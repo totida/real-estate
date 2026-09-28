@@ -1,6 +1,6 @@
 # 부산 아파트 25~26평 새 매물 알림
 
-네이버 부동산(fin.land.naver.com)에서 아래 단지들의 **25~26평** 매물을 하루 세 번(10시·15시·20시) 조회하고,
+네이버 부동산(fin.land.naver.com)에서 아래 단지들의 **25~26평** 매물을 매일 오전 10시에 조회하고,
 새 매물이 올라오면 알림을 보냅니다. 안드로이드 폰의 **Termux**에서 실행합니다.
 
 - 서면아이파크 (1단지·2단지)
@@ -43,10 +43,10 @@ git clone https://github.com/totida/real-estate.git
 cd ~/real-estate && python naver_alert.py      # 첫 실행: 단지별 "기준 저장" 이 나오면 성공
 ```
 
-하루 세 번(10시·15시·20시) 자동 실행 (Termux 를 한 번 껐다 켠 뒤):
+매일 오전 10시 자동 실행 (Termux 를 한 번 껐다 켠 뒤):
 ```bash
 sv-enable crond
-(crontab -l 2>/dev/null | grep -v run-alert; echo "0 10,15,20 * * * $HOME/real-estate/termux/run-alert.sh") | crontab -
+(crontab -l 2>/dev/null | grep -v run-alert; echo "0 10 * * * $HOME/real-estate/termux/run-alert.sh") | crontab -
 termux-wake-lock
 ```
 
