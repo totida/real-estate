@@ -1,0 +1,25 @@
+name: 네이버 접속 점검
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 엔드포인트별 응답 확인
+        run: |
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+          for url in \
+            "https://land.naver.com/" \
+            "https://new.land.naver.com/complexes" \
+            "https://new.land.naver.com/api/search?keyword=%EC%97%B0%EC%82%B0%EB%8D%94%EC%83%B5" \
+            "https://m.land.naver.com/" \
+            "https://m.land.naver.com/search/result/%EC%97%B0%EC%82%B0%EB%8D%94%EC%83%B5" \
+            "https://fin.land.naver.com/" \
+            "https://fin.land.naver.com/front-api/v1/search/autocomplete/complexes?keyword=%EC%97%B0%EC%82%B0%EB%8D%94%EC%83%B5&size=5&page=0" \
+            "https://www.naver.com/" ; do
+            out=$(curl -sS -m 15 -A "$UA" -H "Referer: https://new.land.naver.com/" -o body.txt -w "%{http_code} %{time_total}s %{size_download}B" "$url" 2>&1) || true
+            echo "== $url -> $out"
+            head -c 300 body.txt 2>/dev/null; echo; rm -f body.txt
+          done
