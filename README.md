@@ -11,9 +11,9 @@
 - 연산더샵
 
 ## 동작 방식
-1. `config.json`의 `keywords`로 네이버 부동산 단지를 검색해, 이름에 키워드의 모든 단어가 들어가고
-   주소가 `region`(부산)인 단지를 모두 감시합니다. (예: 서면아이파크 → 1단지, 2단지)
-   찾은 단지번호는 `state/seen.json`에 저장되어 다음부터는 검색하지 않습니다.
+1. `config.json`의 `complexes`에 적힌 단지번호로 매물을 조회합니다. (현재 7개 단지 모두 번호로 지정)
+   `keywords`에 단지명을 적으면 네이버에서 검색해 이름에 키워드의 모든 단어가 들어가고
+   주소가 `region`(부산)인 단지도 감시합니다. 찾은 단지번호는 `state/seen.json`에 저장되어 다음부터는 검색하지 않습니다.
 2. 매매·전세·월세 매물 목록을 가져와 `state/seen.json`에 저장된 기존 매물과 비교합니다.
 3. 새 매물 중 **25평**(`config.json`의 `pyeong`)인 것만 알림을 보냅니다.
    - **GitHub 이슈** (기본값): 저장소에 `새매물` 라벨로 이슈가 만들어지고, GitHub 앱이나 이메일로 알림이 옵니다.
@@ -24,9 +24,9 @@
 ## 설정
 - **텔레그램 알림**: 저장소 Settings → Secrets and variables → Actions에서
   `TELEGRAM_BOT_TOKEN`(@BotFather에서 발급), `TELEGRAM_CHAT_ID`를 추가합니다.
-- **단지 추가/삭제**: `config.json`의 `keywords` 목록을 수정합니다.
+- **단지 추가/삭제**: `config.json`의 `complexes`를 수정합니다. (검색이 429 오류로 막히기 쉬워 번호 지정을 권장)
 - **단지 직접 지정**: 자동 검색이 안 되면 `config.json`에 단지번호를 적습니다.
-  단지번호는 `new.land.naver.com/complexes/<단지번호>` URL에서 확인할 수 있습니다.
+  단지번호는 `fin.land.naver.com/complexes/<단지번호>` URL에서 확인할 수 있습니다.
   ```json
   "complexes": {"12345": "서면아이파크1단지", "67890": "서면아이파크2단지"}
   ```

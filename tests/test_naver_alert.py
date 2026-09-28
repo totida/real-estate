@@ -163,6 +163,18 @@ class MainTest(unittest.TestCase):
         na.NaverLand = lambda: fake
         return na.main()
 
+    def test_complexes_only_skips_search(self):
+        import json
+        self.cfg.write_text(json.dumps(
+            {"keywords": [], "complexes": {"1": "서면아이파크1단지"}, "pyeong": [25]},
+            ensure_ascii=False))
+        fake = FakeNaver({"1": [art(1)]})
+        self.assertEqual(self.run_main(fake), 0)
+        self.assertEqual(fake.searches, [])
+        fake.listings["1"].append(art(2))
+        self.assertEqual(self.run_main(fake), 0)
+        self.assertEqual(len(self.sent), 1)
+
     def test_flow(self):
         big = dict(art(99), supply=112.0, exclusive=84.0)
         self.write_cfg(["서면아이파크"])

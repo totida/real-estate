@@ -336,7 +336,7 @@ def resolve_complexes(naver: NaverLand, keyword: str, region: str) -> dict:
 
 def main() -> int:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    keywords: list[str] = config.get("keywords") or [config["keyword"]]
+    keywords: list[str] = config.get("keywords") or ([config["keyword"]] if config.get("keyword") else [])
     region = config.get("region", "")
     trade_types = config.get("trade_types", ["A1", "B1", "B2"])
     pyeongs = [int(p) for p in config.get("pyeong", [])]
