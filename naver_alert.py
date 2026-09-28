@@ -869,7 +869,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
     """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문)."""
     ok = [r for r in reports if r["status"] != "failed"]
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
-    day = f"{now:%m/%d}"
+    ampm = "오전" if now.hour < 12 else "오후"
+    day = f"{now:%m/%d} {ampm} {now.hour % 12 or 12}시"  # 하루 여러 번 받아도 구분되게
     subject = (f"[매물 브리핑] {day} {label} · 신규 {n_new} · 가격변동 {n_chg} · 사라짐 {n_gone}"
                if ok else f"[매물 브리핑] {day} 조회 실패")
     esc = html.escape

@@ -416,8 +416,10 @@ class BriefingTest(unittest.TestCase):
             {"no": "8", "name": "연산더샵", "status": "first", "listings": [], "gone": [], "changes": []},
             {"no": "9", "name": "양정", "status": "failed", "error": "429"},
         ]
-        subject, text, body = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, tzinfo=na.KST))
-        self.assertEqual(subject, "[매물 브리핑] 10/03 25~26평 · 신규 1 · 가격변동 1 · 사라짐 0")
+        subject, text, body = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, 13, tzinfo=na.KST))
+        self.assertEqual(subject, "[매물 브리핑] 10/03 오후 1시 25~26평 · 신규 1 · 가격변동 1 · 사라짐 0")
+        _, text, _ = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, 8, tzinfo=na.KST))
+        self.assertTrue(text.startswith("10/03 오전 8시 매물 브리핑"))
         self.assertIn('href="https://fin.land.naver.com/complexes/7?tab=article"', body)  # 단지 링크
         self.assertIn('href="https://fin.land.naver.com/articles/6"', body)  # 신규 매물 링크
         self.assertIn("8억 5,000만 → 8억", body)
