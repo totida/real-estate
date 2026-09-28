@@ -481,8 +481,10 @@ class BriefingTest(unittest.TestCase):
              "listings": [dict(a, trade="매매", price="7억 7,000만", price_won=770_000_000)]}
         _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, 13, tzinfo=na.KST))
         self.assertIn("↳ 10/03 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만", text)
-        self.assertNotIn("10/01 오후 8시", text)  # 최근 2개만
-        self.assertIn("↳ 10/02 오전 8시 7억 8,000만 → 7억 6,000만", body)
+        self.assertIn("(이전 변동 2건)", text)
+        # HTML: 최근 1개는 바로 보이고 나머지는 펼치기 안에
+        self.assertIn("이전 변동 2건 ▾</summary>10/02 오전 8시 7억 8,000만 → 7억 6,000만", body)
+        self.assertLess(body.index("10/03 오후 1시 7억 6,000만"), body.index("<details"))
 
     def test_html_escaped(self):
         r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}

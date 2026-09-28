@@ -1092,21 +1092,28 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 place += "층" if a.get("floor") else ""
                 p = pyeong_of(a)
                 text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else ""))
-                hist = recent_price_changes(a)
-                text += [f"      ↳ {x}" for x in hist]
+                hist = recent_price_changes(a, 6)  # 최근 1개 + 펼치면 이전 5개
+                text += [f"      ↳ {x}" for x in hist[:1]]
+                if len(hist) > 1:
+                    text.append(f"      (이전 변동 {len(hist) - 1}건)")
+                    text += [f"        {x}" for x in hist[1:]]
                 h.append(f'<tr style="border-top:1px solid #eee">'
                          f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}</td>'
                          f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
                          f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
                          f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
                 if hist:
-                    lines = []
-                    for x in hist:
+                    def change_html(x: str) -> str:
                         m = re.search(r" ([▲▼][^ ]+)$", x)
-                        body = esc(x[:m.start()] if m else x) + (diff_html(m.group(1)) if m else "")
-                        lines.append(f"↳ {body}")
+                        return esc(x[:m.start()] if m else x) + (diff_html(m.group(1)) if m else "")
+                    cell = f"↳ {change_html(hist[0])}"
+                    if len(hist) > 1:
+                        # 누르면 펼쳐짐 (삼성 이메일·아이폰 메일). Gmail 은 지원하지 않아 펼쳐진 채로 보인다.
+                        cell += ('<details style="margin:2px 0 0 12px"><summary style="cursor:pointer;'
+                                 f'color:#0b57d0">이전 변동 {len(hist) - 1}건 ▾</summary>'
+                                 + "<br>".join(change_html(x) for x in hist[1:]) + "</details>")
                     h.append('<tr><td colspan="5" style="font-size:12px;color:#5f6368;padding:0 4px 6px 14px">'
-                             + "<br>".join(lines) + "</td></tr>")
+                             + cell + "</td></tr>")
             h.append("</table>")
         text.append("")
     h.append('<p style="color:#9aa0a6;font-size:12px;margin-top:24px">사라짐은 두 번 연속 조회에서 목록에 없던 매물입니다. '
