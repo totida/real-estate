@@ -43,8 +43,22 @@ def retry_delay(err: Exception, attempt: int) -> float:
     return 2 * (attempt + 1)
 
 
+# 브라우저가 보내는 헤더와 비슷하게 맞춰야 네이버가 빈 응답/429 를 덜 준다.
+BROWSER_HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "sec-ch-ua": '"Chromium";v="128", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+}
+
+
 def http_get(url: str, headers: dict | None = None, retries: int = 3) -> str:
-    hdrs = {"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"}
+    hdrs = dict(BROWSER_HEADERS)
     hdrs.update(headers or {})
     last_err: Exception | None = None
     for attempt in range(retries):
@@ -59,14 +73,22 @@ def http_get(url: str, headers: dict | None = None, retries: int = 3) -> str:
     raise RuntimeError(f"GET {url} failed: {last_err}")
 
 
-def http_json(url: str, headers: dict | None = None):
-    return json.loads(http_get(url, headers))
+def http_json(url: str, headers: dict | None = None) -> dict:
+    """JSON 객체를 돌려준다. 빈 응답·HTML(차단 페이지 등)이면 앞부분을 담아 예외를 낸다."""
+    text = http_get(url, headers)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        raise RuntimeError(f"예상 밖 응답: {text[:200]!r}")
+    return data
 
 
 # ---------------------------------------------------------------- Naver
 
 class NaverLand:
-    """new.land.naver.com API, 실패 시 m.land.naver.com API 로 대체."""
+    """매물은 m.land.naver.com API(제한이 느슨함)로 먼저 조회하고, 실패하면 new.land 로 대체."""
 
     NEW = "https://new.land.naver.com"
     MOBILE = "https://m.land.naver.com"
@@ -98,10 +120,10 @@ class NaverLand:
 
     def articles(self, complex_no: str, trade_types: list[str]) -> list[dict]:
         try:
-            return self._articles_new(complex_no, trade_types)
-        except Exception as e:  # noqa: BLE001
-            print(f"  new.land 조회 실패({e}), m.land 로 재시도", file=sys.stderr)
             return self._articles_mobile(complex_no, trade_types)
+        except Exception as e:  # noqa: BLE001
+            print(f"  m.land 조회 실패({e}), new.land 로 재시도", file=sys.stderr)
+            return self._articles_new(complex_no, trade_types)
 
     def _articles_new(self, complex_no: str, trade_types: list[str]) -> list[dict]:
         out: list[dict] = []
@@ -128,21 +150,25 @@ class NaverLand:
 
     def _articles_mobile(self, complex_no: str, trade_types: list[str]) -> list[dict]:
         out: list[dict] = []
-        for page in range(1, 51):
-            params = {
-                "hscpNo": complex_no,
-                "tradTpCd": ":".join(trade_types),
-                "order": "date_",
-                "showR0": "N",
-                "page": page,
-            }
-            url = f"{self.MOBILE}/complex/getComplexArticleList?" + urllib.parse.urlencode(params)
-            data = http_json(url, {"Referer": f"{self.MOBILE}/"})
-            result = data.get("result") or {}
-            out += [normalize_mobile(a, complex_no) for a in result.get("list") or []]
-            if result.get("moreDataYn") != "Y":
-                break
-            time.sleep(1)
+        for i, trade in enumerate(trade_types):  # 거래유형을 합쳐 보내면 빈 응답이 올 수 있어 하나씩 조회
+            if i:
+                time.sleep(1.5)
+            for page in range(1, 51):
+                params = {
+                    "hscpNo": complex_no,
+                    "tradTpCd": trade,
+                    "order": "prc_",
+                    "showR0": "N",
+                    "page": page,
+                }
+                url = f"{self.MOBILE}/complex/getComplexArticleList?" + urllib.parse.urlencode(params)
+                data = http_json(url, {"Referer": f"{self.MOBILE}/"})
+                result = data.get("result") or {}
+                items = result.get("list") or []
+                out += [normalize_mobile(a, complex_no) for a in items]
+                if not items or result.get("moreDataYn") != "Y":
+                    break
+                time.sleep(1.5)
         return out
 
 
@@ -169,12 +195,15 @@ def normalize_new(a: dict, complex_no: str) -> dict:
 
 
 def normalize_mobile(a: dict, complex_no: str) -> dict:
+    price = a.get("prcInfo") or a.get("hanPrc") or str(a.get("prc", ""))
+    if a.get("rentPrc") and "/" not in price:
+        price = f"{price}/{a['rentPrc']}"
     return {
         "articleNo": str(a["atclNo"]),
         "complexNo": complex_no,
         "name": a.get("atclNm", ""),
         "trade": a.get("tradTpNm", ""),
-        "price": a.get("prcInfo", ""),
+        "price": price,
         "building": a.get("bildNm", ""),
         "floor": a.get("flrInfo", ""),
         "area": f"{a.get('spc1', '')}/{a.get('spc2', '')}㎡",
@@ -183,7 +212,7 @@ def normalize_mobile(a: dict, complex_no: str) -> dict:
         "direction": a.get("direction", ""),
         "desc": a.get("atclFetrDesc", ""),
         "realtor": a.get("rltrNm", ""),
-        "confirmed": a.get("cfmYmd", ""),
+        "confirmed": a.get("atclCfmYmd") or a.get("cfmYmd", ""),
     }
 
 

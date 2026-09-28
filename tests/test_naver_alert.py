@@ -81,6 +81,33 @@ class ParseTest(unittest.TestCase):
     def test_normalize_mobile(self):
         a = na.normalize_mobile({"atclNo": "456", "tradTpNm": "전세", "prcInfo": "5억"}, "9")
         self.assertEqual((a["articleNo"], a["price"]), ("456", "5억"))
+        a = na.normalize_mobile({"atclNo": "7", "tradTpNm": "월세", "hanPrc": "5,000",
+                                 "rentPrc": 150}, "9")
+        self.assertEqual(a["price"], "5,000/150")
+
+    def test_http_json_rejects_non_object(self):
+        orig = na.http_get
+        try:
+            for body in ("null", "<html>abuse</html>"):
+                na.http_get = lambda url, headers=None, b=body: b
+                with self.assertRaisesRegex(RuntimeError, "예상 밖 응답"):
+                    na.http_json("https://x")
+        finally:
+            na.http_get = orig
+
+    def test_mobile_queries_each_trade_type(self):
+        urls = []
+        orig, osleep = na.http_json, na.time.sleep
+        na.http_json = lambda url, headers=None: urls.append(url) or {
+            "result": {"list": [{"atclNo": str(len(urls))}], "moreDataYn": "N"}}
+        na.time.sleep = lambda s: None
+        try:
+            got = na.NaverLand()._articles_mobile("9", ["A1", "B1"])
+        finally:
+            na.http_json, na.time.sleep = orig, osleep
+        self.assertEqual(len(got), 2)
+        self.assertIn("tradTpCd=A1&", urls[0])
+        self.assertIn("tradTpCd=B1&", urls[1])
 
     def test_format_message(self):
         cx = {"7": "서면아이파크2단지", "8": "연산더샵"}
@@ -145,6 +172,7 @@ class MainTest(unittest.TestCase):
             (na, "notify_github", lambda t, b: self.sent.append((t, b)) or True),
             (na, "notify_telegram", lambda t, b: False),
             (na.time, "sleep", lambda s: None),
+            (na, "NaverLand", na.NaverLand),
         ]
         self.orig = [(m, n, getattr(m, n)) for m, n, _ in self.patches]
         for m, n, v in self.patches:
