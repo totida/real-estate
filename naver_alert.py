@@ -8,6 +8,7 @@ config.json 에 지정한 단지들의 매물 목록을 네이버 부동산(fin.
 from __future__ import annotations
 
 import base64
+import csv
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state" / "seen.json"
+HISTORY_PATH = ROOT / "state" / "history.csv"
 
 KST = timezone(timedelta(hours=9))
 M2_PER_PYEONG = 3.305785
@@ -535,6 +537,29 @@ def matches_pyeong(a: dict, pyeongs: list[int]) -> bool:
                for want in pyeongs)
 
 
+def floor_text(floor: str) -> str:
+    """'중/29' → '중층 (총 29층)', '10/29' → '10층 (총 29층)'."""
+    cur, _, total = str(floor or "").partition("/")
+    if not cur:
+        return ""
+    cur = cur if cur.endswith("층") else f"{cur}층"
+    return f"{cur} (총 {total}층)" if total else cur
+
+
+def size_label(pyeongs: list[int] | None) -> str:
+    ps = sorted(pyeongs or [])
+    if len(ps) > 1 and ps == list(range(ps[0], ps[-1] + 1)):
+        return f"{ps[0]}~{ps[-1]}평"
+    return f"{'/'.join(map(str, ps))}평" if ps else ""
+
+
+def listing_line(a: dict) -> str:
+    p = pyeong_of(a)
+    size_txt = f"{p}평 ({a['area']})" if p else a["area"]
+    where = " ".join(x for x in (a.get("building", ""), floor_text(a.get("floor", ""))) if x)
+    return " · ".join(x for x in (f"[{a['trade']}] {a['price']}", where, size_txt) if x)
+
+
 def article_url(a: dict) -> str:
     return f"https://fin.land.naver.com/articles/{a['articleNo']}"
 
@@ -582,15 +607,129 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
     return new
 
 
+TRACK_KEYS = ("complexNo", "name", "trade", "price", "building", "floor", "area",
+              "supply", "exclusive", "realtor")
+
+
+def track_listings(state: dict, complex_no: str, articles: list[dict], today: str,
+                   wanted=lambda a: True, misses_to_gone: int = 2) -> list[dict]:
+    """조건(wanted)에 맞는 매물을 추적하고, 목록에서 사라진 매물을 돌려준다.
+
+    있는지 여부는 조건과 상관없이 단지의 전체 매물(articles)로 판단한다
+    (평형 조건을 바꿔도 조건에서 빠진 매물이 '사라진 매물' 로 기록되지 않도록).
+    조회에 성공한 단지에 대해서만 부른다. 한 번 빠진 것은 일시적 누락일 수 있어
+    misses_to_gone 번 연속으로 안 보여야 사라진 것으로 본다 (사라진 날은 처음 빠진 날).
+    같은 집의 다른 매물번호(aliases)가 보이면 계속 있는 것으로 본다.
+    """
+    tracked: dict = state.setdefault("tracked", {})
+    by_id = {}
+    for a in articles:
+        for i in (a["articleNo"], *a.get("aliases", [])):
+            by_id[i] = a
+    matched_today = set()
+    gone = []
+    for key, t in list(tracked.items()):
+        if t["complexNo"] != complex_no:
+            continue
+        cur = next((by_id[i] for i in (key, *t.get("aliases", [])) if i in by_id), None)
+        if cur is not None:
+            matched_today.add(id(cur))
+            t.update({k: cur.get(k) for k in TRACK_KEYS}, complexNo=complex_no)
+            t["aliases"] = sorted(set(t.get("aliases", [])) | {cur["articleNo"], *cur.get("aliases", [])}
+                                  - {key})
+            t["last_seen"], t["missed"] = today, 0
+            t.pop("missing_since", None)
+            continue
+        t["missed"] = t.get("missed", 0) + 1
+        t.setdefault("missing_since", today)
+        if t["missed"] >= misses_to_gone:
+            gone.append(dict(t, articleNo=key, gone_date=t["missing_since"]))
+            del tracked[key]
+    for a in articles:
+        if (id(a) in matched_today or not wanted(a)
+                or any(i in tracked for i in (a["articleNo"], *a.get("aliases", [])))):
+            continue
+        tracked[a["articleNo"]] = dict({k: a.get(k) for k in TRACK_KEYS}, complexNo=complex_no,
+                                       aliases=a.get("aliases", []), first_seen=today,
+                                       first_price=a.get("price"), last_seen=today, missed=0)
+    return gone
+
+
+HISTORY_FIELDS = ["사라진날", "단지", "거래", "가격", "처음가격", "동", "층", "평", "면적",
+                  "처음본날", "마지막본날", "중개사", "매물번호"]
+
+
+def append_history(gone: list[dict], complexes: dict, path: Path | None = None) -> None:
+    path = path or HISTORY_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not path.exists()
+    with open(path, "a", encoding="utf-8-sig" if new_file else "utf-8", newline="") as f:
+        w = csv.writer(f)
+        if new_file:
+            w.writerow(HISTORY_FIELDS)
+        for g in gone:
+            w.writerow([g["gone_date"], complexes.get(g["complexNo"], g.get("name", "")),
+                        g.get("trade", ""), g.get("price", ""), g.get("first_price", ""),
+                        g.get("building", ""), g.get("floor", ""), pyeong_of(g) or "",
+                        g.get("area", ""), g.get("first_seen", ""), g.get("last_seen", ""),
+                        g.get("realtor", ""), g["articleNo"]])
+
+
+def days_between(a: str, b: str) -> int | None:
+    try:
+        return (datetime.strptime(b, "%Y-%m-%d") - datetime.strptime(a, "%Y-%m-%d")).days
+    except (TypeError, ValueError):
+        return None
+
+
+def gone_line(g: dict) -> str:
+    line = listing_line(g)
+    if g.get("first_price") and g["first_price"] != g.get("price"):
+        line += f" · 처음 {g['first_price']}"
+    days = days_between(g.get("first_seen"), g.get("gone_date"))
+    if days is not None:
+        line += f" · {g['first_seen'][5:].replace('-', '/')}부터 {days}일 게시"
+    return line
+
+
+def format_gone(gone: list[dict], complexes: dict, pyeongs: list[int] | None = None) -> tuple[str, str]:
+    size = size_label(pyeongs)
+    names = list(dict.fromkeys(complexes.get(g["complexNo"], g.get("name", "")) for g in gone))
+    where = names[0] + (f" 외 {len(names) - 1}곳" if len(names) > 1 else "")
+    title = f"📉{' ' + size if size else ''} 사라진 매물 {len(gone)}건 · {where} (거래 완료 또는 내림)"
+    sections = []
+    for cname in names:
+        lines = [f"### {cname}"]
+        lines += [f"- {gone_line(g)}" for g in gone
+                  if complexes.get(g["complexNo"], g.get("name", "")) == cname]
+        sections.append("\n".join(lines))
+    return title, "\n\n".join(sections)
+
+
+def print_history(limit: int = 30, path: Path | None = None) -> int:
+    path = path or HISTORY_PATH
+    if not path.exists():
+        print("아직 기록된 사라진 매물이 없습니다.")
+        return 0
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    print(f"사라진 매물 {len(rows)}건 중 최근 {min(limit, len(rows))}건 (거래 완료 또는 중개사가 내림)")
+    for r in rows[-limit:][::-1]:
+        price = r["가격"] + (f" (처음 {r['처음가격']})" if r["처음가격"] and r["처음가격"] != r["가격"] else "")
+        days = days_between(r["처음본날"], r["사라진날"])
+        posted = f" · {days}일 게시" if days is not None else ""
+        where = " ".join(x for x in (r["동"], floor_text(r["층"])) if x)
+        size = f"{r['평']}평" if r["평"] else ""
+        print(" · ".join(x for x in (f"{r['사라진날'][5:]} {r['단지']}", f"[{r['거래']}] {price}",
+                                     where, size) if x) + posted)
+    return 0
+
+
 # ---------------------------------------------------------------- Notify
 
 def format_message(new: list[dict], complexes: dict,
                    pyeongs: list[int] | None = None) -> tuple[str, str]:
-    ps = sorted(pyeongs or [])
-    if len(ps) > 1 and ps == list(range(ps[0], ps[-1] + 1)):
-        size = f" {ps[0]}~{ps[-1]}평"
-    else:
-        size = f" {'/'.join(map(str, ps))}평" if ps else ""
+    size = f" {size_label(pyeongs)}" if pyeongs else ""
     names = list(dict.fromkeys(complexes.get(a["complexNo"], a["name"]) for a in new))
     where = names[0] + (f" 외 {len(names) - 1}곳" if len(names) > 1 else "")
     title = f"🏠{size} 새 매물 {len(new)}건 · {where} ({datetime.now(KST):%m/%d %H:%M})"
@@ -600,9 +739,7 @@ def format_message(new: list[dict], complexes: dict,
         for a in new:
             if complexes.get(a["complexNo"], a["name"]) != cname:
                 continue
-            p = pyeong_of(a)
-            size_txt = f"{p}평 ({a['area']})" if p else a["area"]
-            head = f"[{a['trade']}] {a['price']} · {a['building']} {a['floor']}층 · {size_txt}"
+            head = listing_line(a)
             extra = " · ".join(x for x in (a["direction"], a["desc"], a["realtor"]) if x)
             lines.append(f"- **{head}**\n  {extra}\n  {article_url(a)}")
         sections.append("\n".join(lines))
@@ -658,6 +795,8 @@ def resolve_complexes(naver: NaverLand, keyword: str, region: str) -> dict:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--history"]:
+        return print_history(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     keywords: list[str] = config.get("keywords") or ([config["keyword"]] if config.get("keyword") else [])
     region = config.get("region", "")
@@ -694,7 +833,9 @@ def main() -> int:
     initialized = set(state.get("initialized_complexes") or [])
 
     now = datetime.now(KST)
+    today = now.strftime("%Y-%m-%d")
     new: list[dict] = []
+    gone: list[dict] = []
     ok = 0
     try:
         for i, (no, name) in enumerate(complexes.items()):
@@ -710,6 +851,7 @@ def main() -> int:
                 continue
             ok += 1
             fresh = diff_and_update(state, items, now)
+            gone += track_listings(state, no, items, today, lambda a: matches_pyeong(a, pyeongs))
             if no in initialized:
                 matched = [a for a in fresh if matches_pyeong(a, pyeongs)]
                 print(f"{name} ({no}): 매물 {len(items)}건, 새 매물 {len(fresh)}건 (조건 일치 {len(matched)}건)")
@@ -721,6 +863,9 @@ def main() -> int:
     finally:
         naver.close()
     state["initialized_complexes"] = sorted(initialized)
+    # 감시 대상에서 빠진 단지의 추적 기록은 정리한다
+    state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
+                        if t["complexNo"] in complexes}
 
     if not ok:
         print("매물을 조회한 단지가 없습니다.")
@@ -732,6 +877,13 @@ def main() -> int:
         print(f"알림 전송: {', '.join(sent) or '(설정된 채널 없음)'}")
     else:
         print("조건에 맞는 새 매물 없음")
+
+    if gone:
+        append_history(gone, complexes)
+        title, body = format_gone(gone, complexes, pyeongs)
+        print(title + "\n" + body)
+        for f in (notify_telegram, notify_github):
+            f(title, body)
 
     state["last_run"] = now.isoformat(timespec="seconds")
     save_state(state)

@@ -30,6 +30,47 @@ class DiffTest(unittest.TestCase):
         na.diff_and_update(state, [], now + timedelta(days=3))
         self.assertEqual(na.diff_and_update(state, [art(1)], now + timedelta(days=4)), [])
 
+    def test_track_gone_after_two_misses(self):
+        state = {}
+        self.assertEqual(na.track_listings(state, "1", [art(1), art(2)], "2026-09-28"), [])
+        self.assertEqual(na.track_listings(state, "1", [art(1)], "2026-09-29"), [])  # 한 번 빠짐
+        gone = na.track_listings(state, "1", [art(1)], "2026-09-30")
+        self.assertEqual([g["articleNo"] for g in gone], ["2"])
+        self.assertEqual(gone[0]["gone_date"], "2026-09-29")  # 처음 빠진 날
+        self.assertEqual(gone[0]["first_seen"], "2026-09-28")
+        self.assertEqual(list(state["tracked"]), ["1"])
+
+    def test_track_reappear_resets(self):
+        state = {}
+        na.track_listings(state, "1", [art(1)], "2026-09-28")
+        na.track_listings(state, "1", [], "2026-09-29")
+        self.assertEqual(na.track_listings(state, "1", [dict(art(1), price="7억")], "2026-09-30"), [])
+        t = state["tracked"]["1"]
+        self.assertEqual((t["missed"], t["price"], t["first_price"]), (0, "7억", "8억"))
+        self.assertEqual(na.track_listings(state, "1", [], "2026-10-01"), [])
+
+    def test_track_other_complex_untouched(self):
+        state = {}
+        na.track_listings(state, "1", [art(1)], "2026-09-28")
+        for day in ("2026-09-29", "2026-09-30"):
+            self.assertEqual(na.track_listings(state, "2", [], day), [])
+        self.assertIn("1", state["tracked"])
+
+    def test_track_filter_change_not_gone(self):
+        state = {}
+        na.track_listings(state, "1", [art(1)], "2026-09-28")
+        no_match = lambda a: False  # 조건이 바뀌어 더 이상 맞지 않아도 목록에 있으면 사라진 게 아님
+        for day in ("2026-09-29", "2026-09-30"):
+            self.assertEqual(na.track_listings(state, "1", [art(1), art(2)], day, no_match), [])
+        self.assertEqual(list(state["tracked"]), ["1"])  # 조건에 안 맞는 새 매물은 추적 안 함
+
+    def test_track_representative_change(self):
+        state = {}
+        na.track_listings(state, "1", [dict(art(1), aliases=["2"])], "2026-09-28")
+        for day in ("2026-09-29", "2026-09-30"):
+            self.assertEqual(na.track_listings(state, "1", [dict(art(2), aliases=["1"])], day), [])
+        self.assertEqual(list(state["tracked"]), ["1"])
+
     def test_representative_change_not_realerted(self):
         # 같은 집을 여러 중개사가 올린 경우 대표 매물 번호가 바뀌어도 새 매물이 아니다
         now = datetime(2026, 9, 28, tzinfo=na.KST)
@@ -132,6 +173,21 @@ class ParseTest(unittest.TestCase):
         a = na.normalize_fin({"representativeArticleInfo": {"articleNumber": 1, "dongName": "A동"}}, "9")
         self.assertEqual(a["building"], "A동")
 
+    def test_floor_text(self):
+        self.assertEqual(na.floor_text("중/29"), "중층 (총 29층)")
+        self.assertEqual(na.floor_text("10/29"), "10층 (총 29층)")
+        self.assertEqual(na.floor_text("5"), "5층")
+        self.assertEqual(na.floor_text(""), "")
+
+    def test_format_gone(self):
+        g = dict(art(5, "7"), price="7억 5,000만", first_price="8억", first_seen="2026-09-18",
+                 gone_date="2026-09-30")
+        title, body = na.format_gone([g], {"7": "서면아이파크2단지"}, [25, 26])
+        self.assertIn("25~26평 사라진 매물 1건 · 서면아이파크2단지", title)
+        self.assertIn("[매매] 7억 5,000만 · 101동 10층 (총 30층)", body)
+        self.assertIn("처음 8억", body)
+        self.assertIn("09/18부터 12일 게시", body)
+
     def test_format_message(self):
         cx = {"7": "서면아이파크2단지", "8": "연산더샵"}
         title, body = na.format_message([art(1, "7"), art(2, "8"), art(3, "7")], cx, [25])
@@ -201,6 +257,7 @@ class MainTest(unittest.TestCase):
             (na, "notify_telegram", lambda t, b: False),
             (na.time, "sleep", lambda s: None),
             (na, "NaverLand", na.NaverLand),
+            (na, "HISTORY_PATH", self.tmp / "history.csv"),
         ]
         self.orig = [(m, n, getattr(m, n)) for m, n, _ in self.patches]
         for m, n, v in self.patches:
@@ -268,6 +325,29 @@ class MainTest(unittest.TestCase):
         self.run_main(fake)
         self.assertEqual(len(self.sent), 2)
         self.assertIn("연산더샵", self.sent[1][0])
+
+
+    def test_gone_history(self):
+        import contextlib
+        import io
+        self.cfg.write_text(json.dumps(
+            {"keywords": [], "complexes": {"1": "서면아이파크1단지"}, "pyeong": [25]},
+            ensure_ascii=False))
+        big = dict(art(99), supply=112.0, exclusive=84.0)
+        fake = FakeNaver({"1": [art(1), art(2), big]})
+        self.run_main(fake)
+        self.assertEqual(sorted(na.load_state()["tracked"]), ["1", "2"])  # 34평은 추적 안 함
+        fake.listings["1"] = [art(1)]
+        self.run_main(fake)
+        self.assertEqual(self.sent, [])  # 한 번 빠진 것은 아직 사라진 것으로 보지 않음
+        self.run_main(fake)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("사라진 매물 1건", self.sent[0][0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            na.print_history()
+        self.assertIn("서면아이파크1단지 · [매매] 8억 · 101동 10층 (총 30층) · 25평", out.getvalue())
+        self.assertNotIn("2", na.load_state()["tracked"])
 
 
 class ChromiumIntegrationTest(unittest.TestCase):
