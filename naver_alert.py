@@ -23,6 +23,7 @@ CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state" / "seen.json"
 
 KST = timezone(timedelta(hours=9))
+M2_PER_PYEONG = 3.305785
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -147,6 +148,8 @@ def normalize_new(a: dict, complex_no: str) -> dict:
         "building": a.get("buildingName", ""),
         "floor": a.get("floorInfo", ""),
         "area": f"{a.get('area1', '')}/{a.get('area2', '')}㎡",
+        "supply": to_float(a.get("area1")),
+        "exclusive": to_float(a.get("area2")),
         "direction": a.get("direction", ""),
         "desc": a.get("articleFeatureDesc", ""),
         "realtor": a.get("realtorName", ""),
@@ -164,11 +167,45 @@ def normalize_mobile(a: dict, complex_no: str) -> dict:
         "building": a.get("bildNm", ""),
         "floor": a.get("flrInfo", ""),
         "area": f"{a.get('spc1', '')}/{a.get('spc2', '')}㎡",
+        "supply": to_float(a.get("spc1")),
+        "exclusive": to_float(a.get("spc2")),
         "direction": a.get("direction", ""),
         "desc": a.get("atclFetrDesc", ""),
         "realtor": a.get("rltrNm", ""),
         "confirmed": a.get("cfmYmd", ""),
     }
+
+
+def to_float(v) -> float | None:
+    try:
+        return float(str(v).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def pyeong_of(a: dict) -> int | None:
+    """평형(공급면적 기준). 공급면적이 없으면 전용면적으로 추정한다."""
+    if a.get("supply"):
+        return round(a["supply"] / M2_PER_PYEONG)
+    if a.get("exclusive"):
+        # 아파트 전용률 약 75% 가정 (전용 59㎡ ≈ 25평형, 84㎡ ≈ 34평형)
+        return round(a["exclusive"] / 0.75 / M2_PER_PYEONG)
+    return None
+
+
+def matches_pyeong(a: dict, pyeongs: list[int]) -> bool:
+    """pyeongs 가 비어 있으면 모든 평형을 허용한다.
+
+    공급면적이 있으면 네이버 표기와 같은 평형으로 정확히 비교하고,
+    전용면적으로 추정한 경우에만 ±1평 오차를 허용한다.
+    """
+    if not pyeongs:
+        return True
+    p = pyeong_of(a)
+    if p is None:
+        return True  # 면적 정보가 없으면 놓치지 않도록 알림에 포함
+    return any(abs(p - want) <= 1 if a.get("supply") is None else p == want
+               for want in pyeongs)
 
 
 def article_url(a: dict) -> str:
@@ -216,12 +253,16 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
 # ---------------------------------------------------------------- Notify
 
-def format_message(keyword: str, new: list[dict], complexes: dict) -> tuple[str, str]:
-    title = f"🏠 {keyword} 새 매물 {len(new)}건 ({datetime.now(KST):%m/%d %H:%M})"
+def format_message(keyword: str, new: list[dict], complexes: dict,
+                   pyeongs: list[int] | None = None) -> tuple[str, str]:
+    size = f" {'/'.join(map(str, pyeongs))}평" if pyeongs else ""
+    title = f"🏠 {keyword}{size} 새 매물 {len(new)}건 ({datetime.now(KST):%m/%d %H:%M})"
     lines = []
     for a in new:
         cname = complexes.get(a["complexNo"], a["name"])
-        head = f"[{a['trade']}] {a['price']} · {cname} {a['building']} {a['floor']}층 · {a['area']}"
+        p = pyeong_of(a)
+        size_txt = f"{p}평 ({a['area']})" if p else a["area"]
+        head = f"[{a['trade']}] {a['price']} · {cname} {a['building']} {a['floor']}층 · {size_txt}"
         extra = " · ".join(x for x in (a["direction"], a["desc"], a["realtor"]) if x)
         lines.append(f"- **{head}**\n  {extra}\n  {article_url(a)}")
     return title, "\n".join(lines)
@@ -263,6 +304,7 @@ def main() -> int:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     keyword = config["keyword"]
     trade_types = config.get("trade_types", ["A1", "B1", "B2"])
+    pyeongs = [int(p) for p in config.get("pyeong", [])]
     state = load_state()
     naver = NaverLand()
 
@@ -287,20 +329,21 @@ def main() -> int:
         articles += items
 
     now = datetime.now(KST)
-    new = diff_and_update(state, articles, now)
+    # 모든 매물을 seen 에 기록하고, 알림은 원하는 평형만 보낸다.
+    new = [a for a in diff_and_update(state, articles, now) if matches_pyeong(a, pyeongs)]
 
     if not state.get("initialized"):
         # 첫 실행: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
         state["initialized"] = True
         print(f"초기화 완료: 기존 매물 {len(articles)}건 저장 (알림 없음)")
     elif new:
-        title, body = format_message(keyword, new, complexes)
+        title, body = format_message(keyword, new, complexes, pyeongs)
         print(title + "\n" + body)
         sent = [n for n, f in (("telegram", notify_telegram), ("github", notify_github))
                 if f(title, body)]
         print(f"알림 전송: {', '.join(sent) or '(설정된 채널 없음)'}")
     else:
-        print("새 매물 없음")
+        print("조건에 맞는 새 매물 없음")
 
     state["last_run"] = now.isoformat(timespec="seconds")
     save_state(state)
