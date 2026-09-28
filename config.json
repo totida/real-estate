@@ -8,7 +8,7 @@
     "연산더샵"
   ],
   "region": "부산",
-  "complexes": {},
+  "complexes": {"119101": "서면아이파크1단지"},
   "trade_types": ["A1", "B1", "B2"],
   "pyeong": [25]
 }
