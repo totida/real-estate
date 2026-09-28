@@ -645,7 +645,7 @@ TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "b
 
 def track_listings(state: dict, complex_no: str, articles: list[dict], today: str,
                    wanted=lambda a: True, changes: list | None = None,
-                   misses_to_gone: int = 2) -> list[dict]:
+                   misses_to_gone: int = 2, stamp: str | None = None) -> list[dict]:
     """조건(wanted)에 맞는 매물을 추적하고, 목록에서 사라진 매물을 돌려준다.
 
     가격이 바뀐 매물은 changes 에 담는다. 같은 집이라도 대표 매물(중개사)이 바뀌면
@@ -675,7 +675,8 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                          (t.get("price_won"), t.get("rent_won")))
             if (cur["articleNo"] == before.get("rep", key) and old[0] and now_[0]
                     and old != now_):
-                t["price_history"] = [*before.get("price_history", []), [today, t["price"]]][-10:]
+                t["price_history"] = [*before.get("price_history", []),
+                                      [stamp or today, t["price"], t.get("price_won")]][-10:]
                 if changes is not None:
                     changes.append(dict(t, articleNo=cur["articleNo"], old_price=before.get("price"),
                                         old_price_won=old[0], old_rent_won=old[1]))
@@ -698,7 +699,7 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                                        aliases=a.get("aliases", []), rep=a["articleNo"],
                                        first_seen=today, first_price=a.get("price"),
                                        first_price_won=a.get("price_won"),
-                                       price_history=[[today, a.get("price")]],
+                                       price_history=[[today, a.get("price"), a.get("price_won")]],
                                        last_seen=today, missed=0)
     return gone
 
@@ -865,12 +866,90 @@ def sale_rows(r: dict) -> list[dict]:
     return sorted(rows, key=lambda a: a.get("price_won") or 0)
 
 
-def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str, str, str]:
-    """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문)."""
+def time_label(dt: datetime, with_date: bool = True) -> str:
+    """'10/03 오후 1시' (with_date=False 면 '오후 1시')."""
+    t = f"{'오전' if dt.hour < 12 else '오후'} {dt.hour % 12 or 12}시"
+    return f"{dt:%m/%d} {t}" if with_date else t
+
+
+def parse_time(iso: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(iso) if iso else None
+    except ValueError:
+        return None
+
+
+EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
+              "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
+              "first_price", "gone_date")
+EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
+
+
+def log_events(state: dict, reports: dict, now: datetime, since: datetime | None,
+               keep_days: int = 14) -> None:
+    """이번에 확인한 변동을 시각과 함께 state['events'] 에 쌓는다 (최근 7일 브리핑용)."""
+    events: list = state.setdefault("events", [])
+    at = now.isoformat(timespec="minutes")
+    prev = since.isoformat(timespec="minutes") if since else None
+    for no, r in reports.items():
+        for kind, key in (("new", "new"), ("change", "changes"), ("gone", "gone")):
+            for a in r.get(key, []):
+                events.append({"at": at, "since": prev, "kind": kind, "complexNo": no,
+                               "item": {k: a.get(k) for k in EVENT_KEYS if a.get(k) is not None}})
+    cutoff = (now - timedelta(days=keep_days)).isoformat(timespec="minutes")
+    state["events"] = [e for e in events if e["at"] >= cutoff]
+
+
+def recent_events(state: dict, complex_no: str, now: datetime, days: int = 7) -> list[dict]:
+    cutoff = (now - timedelta(days=days)).isoformat(timespec="minutes")
+    return sorted((e for e in state.get("events") or []
+                   if e["complexNo"] == complex_no and e["at"] >= cutoff),
+                  key=lambda e: e["at"], reverse=True)
+
+
+def event_text(e: dict) -> str:
+    a = e["item"]
+    if e["kind"] == "change":
+        return f"[{a.get('trade')}] {a.get('old_price')} → {a.get('price')} ({change_diff(a)}) · {where_text(a)}"
+    if e["kind"] == "gone":
+        days = days_between(a.get("first_seen"), a.get("gone_date"))
+        parts = [f"[{a.get('trade')}] {a.get('price')}", where_text(a),
+                 f"{days}일 게시" if days is not None else ""]
+        return " · ".join(x for x in parts if x)
+    return " · ".join(x for x in (f"[{a.get('trade')}] {a.get('price')}", where_text(a)) if x)
+
+
+def stamp_label(stamp: str) -> str:
+    """'2026-10-03T13:00+09:00' → '10/03 오후 1시', 날짜만 있으면 '10/03'."""
+    dt = parse_time(stamp) if "T" in str(stamp) else None
+    return time_label(dt) if dt else str(stamp)[5:].replace("-", "/")
+
+
+def recent_price_changes(a: dict, n: int = 2) -> list[str]:
+    """매물의 최근 가격 변동 n개 (최신순): '10/03 오후 1시 6억 2,000만 → 5억 9,000만 ▼3,000만'."""
+    hist = a.get("price_history") or []
+    out = []
+    for prev, cur in list(zip(hist, hist[1:]))[-n:][::-1]:
+        d = diff_text(prev[2] if len(prev) > 2 else None, cur[2] if len(cur) > 2 else None)
+        out.append(f"{stamp_label(cur[0])} {prev[1]} → {cur[1]}" + (f" {d}" if d else ""))
+    return out
+
+
+def format_briefing(reports: list[dict], label: str, now: datetime,
+                    since: datetime | None = None) -> tuple[str, str, str]:
+    """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문).
+
+    since 는 이전 브리핑 시각. 이번 변동은 그 사이에 생긴 것이다.
+    각 단지의 r['week'] 에 최근 7일 변동(log_events 기록)이 있으면 함께 보여준다.
+    """
     ok = [r for r in reports if r["status"] != "failed"]
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
-    ampm = "오전" if now.hour < 12 else "오후"
-    day = f"{now:%m/%d} {ampm} {now.hour % 12 or 12}시"  # 하루 여러 번 받아도 구분되게
+    day = time_label(now)  # 하루 여러 번 받아도 구분되게
+    if since:
+        same_day = since.date() == now.date()
+        window = f"{time_label(since, with_date=not same_day)} ~ {time_label(now, with_date=False)}"
+    else:
+        window = ""
     subject = (f"[매물 브리핑] {day} {label} · 신규 {n_new} · 가격변동 {n_chg} · 사라짐 {n_gone}"
                if ok else f"[매물 브리핑] {day} 조회 실패")
     esc = html.escape
@@ -890,17 +969,22 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
         '<div style="font-family:-apple-system,Roboto,\'Noto Sans KR\',sans-serif;font-size:14px;'
         'line-height:1.5;color:#1f1f1f;max-width:720px;word-break:keep-all">',
         f'<h2 style="font-size:19px;margin:0 0 4px">{esc(day)} 매물 브리핑</h2>',
-        f'<div style="color:#5f6368;margin-bottom:12px">{esc(label)} · 신규 {n_new} · '
-        f'가격변동 {n_chg} · 사라짐 {n_gone} · 단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다</div>',
+        f'<div style="color:#5f6368;margin-bottom:12px">{esc(label)} · 이번 변동'
+        + (f" ({esc(window)} 사이)" if window else "")
+        + f': 신규 {n_new} · 가격변동 {n_chg} · 사라짐 {n_gone}<br>'
+        '단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다. 놓친 변동은 단지별 "최근 7일 변동"에 있습니다.</div>',
         '<table width="100%" cellpadding="6" style="border-collapse:collapse;font-size:13px;'
         'margin-bottom:8px;width:100%">',
         '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">단지</th><th>매물</th>'
-        '<th>신규</th><th>변동</th><th>사라짐</th></tr>',
+        '<th>신규</th><th>변동</th><th>사라짐</th><th>7일</th></tr>',
     ]
+    if window:
+        text.insert(1, f"이번 변동: {window} 사이")
     for r in reports:
-        cells = (["조회 실패", "", "", ""] if r["status"] == "failed" else
+        week = str(len(r.get("week", [])))
+        cells = (["조회 실패", "", "", "", week] if r["status"] == "failed" else
                  [str(len(r.get("listings", []))), str(len(r.get("new", []))),
-                  str(len(r.get("changes", []))), str(len(r.get("gone", [])))])
+                  str(len(r.get("changes", []))), str(len(r.get("gone", []))), week])
         h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}</td>'
                  + "".join(f'<td align="center" style="white-space:nowrap">{esc(c)}</td>'
                            for c in cells) + "</tr>")
@@ -937,7 +1021,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
                 items.append(link(article_url(a), f"[{a['trade']}] {a['price']}")
                              + f" · {esc(where_text(a))}"
                              + (f'<br><span style="color:#5f6368">{esc(extra)}</span>' if extra else ""))
-            section(f"🆕 신규 {len(r['new'])}건", items)
+            section(f"🆕 이번 신규 {len(r['new'])}건", items)
         if r.get("changes"):
             text.append(f"  [가격 변동 {len(r['changes'])}건]")
             items = []
@@ -947,7 +1031,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
                          f"    {article_url(c)}"]
                 items.append(link(article_url(c), f"[{c['trade']}] {c['old_price']} → {c['price']}")
                              + diff_html(d) + f" · {esc(where_text(c))}")
-            section(f"💰 가격 변동 {len(r['changes'])}건", items)
+            section(f"💰 이번 가격 변동 {len(r['changes'])}건", items)
         if r.get("gone"):
             text.append(f"  [사라짐 {len(r['gone'])}건] 거래 완료 또는 중개사가 내림")
             items = []
@@ -959,10 +1043,38 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
                 tail = " · ".join(x for x in (where_text(g), first, posted) if x)
                 text.append(f"  - [{g['trade']}] {g['price']} · {tail}")
                 items.append(f"[{esc(g['trade'])}] {esc(g['price'])} · {esc(tail)}")
-            section(f"📉 사라짐 {len(r['gone'])}건 (거래 완료 또는 내림)", items)
+            section(f"📉 이번 사라짐 {len(r['gone'])}건 (거래 완료 또는 내림)", items)
         if r["status"] == "ok" and not (r.get("new") or r.get("changes") or r.get("gone")):
-            text.append("  변동 없음")
-            h.append('<div style="color:#5f6368;margin-top:6px">변동 없음</div>')
+            text.append("  이번 변동 없음")
+            h.append('<div style="color:#5f6368;margin-top:6px">이번 변동 없음</div>')
+        week = r.get("week") or []
+        if week:
+            text.append(f"  [최근 7일 변동 {len(week)}건, 최신순 · 시각은 변동을 확인한 브리핑]")
+            h.append(f'<div style="font-weight:600;margin:10px 0 2px">🗓 최근 7일 변동 {len(week)}건 '
+                     '<span style="font-weight:400;color:#5f6368">(최신순 · 시각은 변동을 확인한 브리핑, '
+                     '그 전 브리핑 이후 생긴 변동)</span></div>'
+                     '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:13px;'
+                     'width:100%">')
+            colors = {"new": "#188038", "change": "#b06000", "gone": "#5f6368"}
+            for e in week:
+                at = parse_time(e["at"])
+                when = time_label(at) if at else e["at"]
+                kind = EVENT_NAMES.get(e["kind"], e["kind"])
+                a = e["item"]
+                text.append(f"  - {when} [{kind}] {event_text(e)}")
+                if e["kind"] == "change":
+                    body = (link(article_url(a), f"[{a.get('trade')}] {a.get('old_price')} → {a.get('price')}")
+                            + diff_html(change_diff(a)) + f" · {esc(where_text(a))}")
+                elif e["kind"] == "gone":
+                    body = esc(event_text(e))
+                else:
+                    body = (link(article_url(a), f"[{a.get('trade')}] {a.get('price')}")
+                            + f" · {esc(where_text(a))}")
+                h.append(f'<tr style="border-top:1px solid #eee;vertical-align:top">'
+                         f'<td style="white-space:nowrap;color:#5f6368">{esc(when)}</td>'
+                         f'<td style="white-space:nowrap;color:{colors.get(e["kind"], "#1f1f1f")};'
+                         f'font-weight:600">{esc(kind)}</td><td>{body}</td></tr>')
+            h.append("</table>")
         rows = sale_rows(r)
         if rows:
             text.append(f"  [현재 매매 {len(rows)}건, 가격순 · 변동은 처음 본 가격 대비]")
@@ -980,14 +1092,24 @@ def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str
                 place += "층" if a.get("floor") else ""
                 p = pyeong_of(a)
                 text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else ""))
+                hist = recent_price_changes(a)
+                text += [f"      ↳ {x}" for x in hist]
                 h.append(f'<tr style="border-top:1px solid #eee">'
                          f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}</td>'
                          f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
                          f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
                          f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
+                if hist:
+                    lines = []
+                    for x in hist:
+                        m = re.search(r" ([▲▼][^ ]+)$", x)
+                        body = esc(x[:m.start()] if m else x) + (diff_html(m.group(1)) if m else "")
+                        lines.append(f"↳ {body}")
+                    h.append('<tr><td colspan="5" style="font-size:12px;color:#5f6368;padding:0 4px 6px 14px">'
+                             + "<br>".join(lines) + "</td></tr>")
             h.append("</table>")
         text.append("")
-    h.append('<p style="color:#9aa0a6;font-size:12px;margin-top:24px">사라짐은 이틀 연속 목록에 없던 매물입니다. '
+    h.append('<p style="color:#9aa0a6;font-size:12px;margin-top:24px">사라짐은 두 번 연속 조회에서 목록에 없던 매물입니다. '
              '거래 완료인지 중개사가 내린 것인지는 구분할 수 없습니다.</p></div>')
     return subject, "\n".join(text), "".join(h)
 
@@ -1022,7 +1144,8 @@ def tracked_info(state: dict, a: dict) -> dict:
     for key, t in (state.get("tracked") or {}).items():
         if ids & {key, t.get("rep"), *t.get("aliases", [])}:
             return dict(a, first_seen=t.get("first_seen"), first_price=t.get("first_price"),
-                        first_price_won=t.get("first_price_won"))
+                        first_price_won=t.get("first_price_won"),
+                        price_history=t.get("price_history", []))
     return a
 
 
@@ -1114,7 +1237,8 @@ def main() -> int:
             ok += 1
             fresh = diff_and_update(state, items, now)
             changes: list[dict] = []
-            lost = track_listings(state, no, items, today, wanted, changes)
+            lost = track_listings(state, no, items, today, wanted, changes,
+                                  stamp=now.isoformat(timespec="minutes"))
             gone += lost
             report = {"status": "ok", "gone": lost, "changes": changes,
                       "listings": [tracked_info(state, a) for a in items if wanted(a)]}
@@ -1154,10 +1278,13 @@ def main() -> int:
         for f in (notify_telegram, notify_github):
             f(title, body)
 
+    since = parse_time(state.get("last_run"))
+    log_events(state, reports, now, since)
     if mail_configured():
         briefing = [dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
-                         no=no, name=name) for no, name in complexes.items()]
-        subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now)
+                         no=no, name=name, week=recent_events(state, no, now))
+                    for no, name in complexes.items()]
+        subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now, since)
         try:
             print(f"메일 전송 완료: {send_mail(subject, text, html_body)}")
         except Exception as e:  # noqa: BLE001

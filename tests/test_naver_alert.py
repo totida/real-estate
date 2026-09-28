@@ -65,7 +65,7 @@ class DiffTest(unittest.TestCase):
         c = changes[0]
         self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
         self.assertEqual(na.change_diff(c), "▼5,000만")
-        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만"])
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000])
         # 같은 가격이면 변동 없음
         na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)
@@ -381,6 +381,8 @@ class MainTest(unittest.TestCase):
         html_body = msgs[1].get_body(("html",)).get_content()
         self.assertIn("8억 → 7억", html_body)
         self.assertIn("조회 실패", html_body)  # 차단된 단지도 브리핑에 표시
+        self.assertIn("최근 7일 변동 2건", html_body)  # 신규 1 + 가격 1, 확인 시각과 함께
+        self.assertEqual(len(na.load_state()["events"]), 2)
 
     def test_gone_history(self):
         import contextlib
@@ -426,6 +428,61 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("▼5,000만", body)
         self.assertIn("첫 조회", text)
         self.assertIn("조회 실패: 429", text)
+
+    def test_events_window(self):
+        state = {}
+        t0 = datetime(2026, 10, 1, 8, tzinfo=na.KST)
+        na.log_events(state, {"7": {"new": [dict(art(1, "7"), price_won=1)]}}, t0, None)
+        t1 = datetime(2026, 10, 9, 13, tzinfo=na.KST)
+        chg = dict(art(2, "7"), old_price="8억", price="7억", price_won=700_000_000,
+                   old_price_won=800_000_000)
+        na.log_events(state, {"7": {"changes": [chg]}, "8": {"gone": [art(3, "8")]}}, t1,
+                      datetime(2026, 10, 9, 8, tzinfo=na.KST))
+        week = na.recent_events(state, "7", t1)
+        self.assertEqual([e["kind"] for e in week], ["change"])  # 8일 전 신규는 7일 밖
+        self.assertEqual(week[0]["since"], "2026-10-09T08:00+09:00")
+        self.assertEqual(len(state["events"]), 3)  # 14일까지는 보관
+        na.log_events(state, {}, datetime(2026, 10, 20, 8, tzinfo=na.KST), t1)
+        self.assertEqual([e["complexNo"] for e in state["events"]], ["7", "8"])
+
+    def test_briefing_week_and_window(self):
+        now = datetime(2026, 10, 3, 13, tzinfo=na.KST)
+        week = [{"at": "2026-10-03T08:00+09:00", "kind": "change", "complexNo": "7",
+                 "item": {"articleNo": "5", "trade": "매매", "old_price": "6억 2,000만",
+                          "price": "5억 9,000만", "old_price_won": 620_000_000,
+                          "price_won": 590_000_000, "building": "201동", "floor": "중/29"}},
+                {"at": "2026-10-02T20:00+09:00", "kind": "gone", "complexNo": "7",
+                 "item": {"articleNo": "4", "trade": "매매", "price": "5억 7,000만",
+                          "first_seen": "2026-09-20", "gone_date": "2026-10-02"}}]
+        r = {"no": "7", "name": "서면아이파크2단지", "status": "ok", "listings": [],
+             "new": [], "changes": [], "gone": [], "week": week}
+        _, text, body = na.format_briefing([r], "25~26평", now, datetime(2026, 10, 3, 8, tzinfo=na.KST))
+        self.assertIn("이번 변동: 오전 8시 ~ 오후 1시 사이", text)  # 같은 날이면 날짜 생략
+        self.assertIn("이번 변동 없음", text)
+        self.assertIn("최근 7일 변동 2건", body)
+        self.assertIn("10/03 오전 8시 [가격] [매매] 6억 2,000만 → 5억 9,000만 (▼3,000만)", text)
+        self.assertIn("10/02 오후 8시 [사라짐] [매매] 5억 7,000만", text)
+        self.assertIn('href="https://fin.land.naver.com/articles/5"', body)
+        _, text, _ = na.format_briefing([r], "25~26평", now, datetime(2026, 10, 2, 20, tzinfo=na.KST))
+        self.assertIn("10/02 오후 8시 ~ 오후 1시 사이", text)
+
+    def test_recent_price_changes(self):
+        state, changes = {}, []
+        for i, (won, stamp) in enumerate([(800_000_000, None), (780_000_000, "2026-10-01T20:00+09:00"),
+                                          (760_000_000, "2026-10-02T08:00+09:00"),
+                                          (770_000_000, "2026-10-03T13:00+09:00")]):
+            na.track_listings(state, "1", [dict(art(1), price=na.won_text(won), price_won=won)],
+                              f"2026-10-0{i}", changes=changes, stamp=stamp)
+        a = na.tracked_info(state, art(1))
+        self.assertEqual(na.recent_price_changes(a), [
+            "10/03 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만",
+            "10/02 오전 8시 7억 8,000만 → 7억 6,000만 ▼2,000만"])
+        r = {"no": "1", "name": "A", "status": "ok", "new": [], "changes": [], "gone": [],
+             "listings": [dict(a, trade="매매", price="7억 7,000만", price_won=770_000_000)]}
+        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, 13, tzinfo=na.KST))
+        self.assertIn("↳ 10/03 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만", text)
+        self.assertNotIn("10/01 오후 8시", text)  # 최근 2개만
+        self.assertIn("↳ 10/02 오전 8시 7억 8,000만 → 7억 6,000만", body)
 
     def test_html_escaped(self):
         r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}
