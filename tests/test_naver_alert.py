@@ -66,6 +66,11 @@ class ParseTest(unittest.TestCase):
             self.assertTrue(na.matches_keyword(name, "서면아이파크"), name)
         self.assertFalse(na.matches_keyword("서면롯데캐슬", "서면아이파크"))
 
+    def test_keyword_tokens_any_order(self):
+        self.assertTrue(na.matches_keyword("문현롯데캐슬인피니엘", "롯데캐슬 인피니엘"))
+        self.assertTrue(na.matches_keyword("양정포레힐즈스위첸", "양정포레힐즈 스위첸"))
+        self.assertFalse(na.matches_keyword("롯데캐슬골드", "롯데캐슬 인피니엘"))
+
     def test_normalize_new(self):
         a = na.normalize_new({"articleNo": 123, "tradeTypeName": "월세",
                               "dealOrWarrantPrc": "5,000", "rentPrc": "150"}, "9")
@@ -78,10 +83,93 @@ class ParseTest(unittest.TestCase):
         self.assertEqual((a["articleNo"], a["price"]), ("456", "5억"))
 
     def test_format_message(self):
-        title, body = na.format_message("서면아이파크", [art(1, "7")], {"7": "서면아이파크2단지"}, [25])
-        self.assertIn("25평 새 매물 1건", title)
+        cx = {"7": "서면아이파크2단지", "8": "연산더샵"}
+        title, body = na.format_message([art(1, "7"), art(2, "8"), art(3, "7")], cx, [25])
+        self.assertIn("25평 새 매물 3건 · 서면아이파크2단지 외 1곳", title)
+        self.assertIn("### 서면아이파크2단지", body)
+        self.assertIn("### 연산더샵", body)
         self.assertIn("25평 (83/59㎡)", body)
         self.assertIn("서면아이파크2단지", body)
+
+
+class FakeNaver:
+    def __init__(self, listings):
+        self.listings = listings  # {complexNo: [articles]}
+        self.searches = []
+
+    def search_complexes(self, kw):
+        self.searches.append(kw)
+        db = [{"complexNo": "1", "complexName": "서면아이파크1단지", "address": "부산시 부산진구 전포동"},
+              {"complexNo": "2", "complexName": "서면아이파크2단지", "address": "부산시 부산진구 전포동"},
+              {"complexNo": "3", "complexName": "연산더샵", "address": "부산시 연제구 연산동"},
+              {"complexNo": "9", "complexName": "연산더샵", "address": "서울시 어딘가"}]
+        return [c for c in db if na.matches_keyword(c["complexName"], kw)]
+
+    def articles(self, no, trade_types):
+        if no == "fail":
+            raise RuntimeError("boom")
+        return self.listings.get(no, [])
+
+
+class MainTest(unittest.TestCase):
+    def setUp(self):
+        import json, tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.cfg = self.tmp / "config.json"
+        self.state = self.tmp / "seen.json"
+        self.write_cfg = lambda kws: self.cfg.write_text(json.dumps(
+            {"keywords": kws, "region": "부산", "pyeong": [25]}, ensure_ascii=False))
+        self.sent = []
+        self.patches = [
+            (na, "CONFIG_PATH", self.cfg), (na, "STATE_PATH", self.state),
+            (na, "notify_github", lambda t, b: self.sent.append((t, b)) or True),
+            (na, "notify_telegram", lambda t, b: False),
+        ]
+        self.orig = [(m, n, getattr(m, n)) for m, n, _ in self.patches]
+        for m, n, v in self.patches:
+            setattr(m, n, v)
+        # load_state/save_state 기본 인자는 정의 시점에 고정되므로 래핑
+        self._load, self._save = na.load_state, na.save_state
+        na.load_state = lambda: self._load(self.state)
+        na.save_state = lambda st: self._save(st, self.state)
+
+    def tearDown(self):
+        for m, n, v in self.orig:
+            setattr(m, n, v)
+        na.load_state, na.save_state = self._load, self._save
+
+    def run_main(self, fake):
+        na.NaverLand = lambda: fake
+        return na.main()
+
+    def test_flow(self):
+        big = dict(art(99), supply=112.0, exclusive=84.0)
+        self.write_cfg(["서면아이파크"])
+        fake = FakeNaver({"1": [art(1)], "2": [art(2)]})
+        self.assertEqual(self.run_main(fake), 0)
+        self.assertEqual(self.sent, [])  # 첫 조회는 알림 없음
+
+        fake.listings["2"].append(art(3, "2"))
+        fake.listings["1"].append(dict(big, complexNo="1"))  # 34평은 제외
+        self.run_main(fake)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("새 매물 1건", self.sent[0][0])
+        self.assertIn("articleNo=3", self.sent[0][1])
+
+        # 단지 추가: 새 단지의 기존 매물은 알림 없이 기준 저장, 서울 동명 단지는 제외
+        self.write_cfg(["서면아이파크", "연산더샵"])
+        fake.listings["3"] = [art(10, "3")]
+        fake.searches.clear()
+        self.run_main(fake)
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(fake.searches, ["연산더샵"])  # 기존 키워드는 캐시 사용
+        st = na.load_state()
+        self.assertEqual(st["initialized_complexes"], ["1", "2", "3"])
+
+        fake.listings["3"].append(art(11, "3"))
+        self.run_main(fake)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("연산더샵", self.sent[1][0])
 
 
 if __name__ == "__main__":

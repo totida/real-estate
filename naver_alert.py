@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """네이버 부동산 신규 매물 알림.
 
-config.json 에 지정한 단지(기본: 서면아이파크)의 매물 목록을 네이버 부동산에서
+config.json 에 지정한 단지들의 매물 목록을 네이버 부동산에서
 조회하고, 이전 실행 때 없던 매물이 생기면 GitHub 이슈 / 텔레그램으로 알린다.
 표준 라이브러리만 사용한다.
 """
@@ -213,8 +213,9 @@ def article_url(a: dict) -> str:
 
 
 def matches_keyword(name: str, keyword: str) -> bool:
-    squash = lambda s: re.sub(r"\s+", "", s).lower()  # noqa: E731
-    return squash(keyword) in squash(name)
+    """키워드의 모든 단어가 단지명에 들어 있으면 일치 (띄어쓰기·순서 무시)."""
+    squashed = re.sub(r"\s+", "", name).lower()
+    return all(tok.lower() in squashed for tok in keyword.split())
 
 
 # ---------------------------------------------------------------- State
@@ -222,7 +223,7 @@ def matches_keyword(name: str, keyword: str) -> bool:
 def load_state(path: Path = STATE_PATH) -> dict:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"initialized": False, "complexes": {}, "seen": {}}
+    return {"keyword_complexes": {}, "initialized_complexes": [], "seen": {}}
 
 
 def save_state(state: dict, path: Path = STATE_PATH) -> None:
@@ -253,19 +254,25 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
 # ---------------------------------------------------------------- Notify
 
-def format_message(keyword: str, new: list[dict], complexes: dict,
+def format_message(new: list[dict], complexes: dict,
                    pyeongs: list[int] | None = None) -> tuple[str, str]:
     size = f" {'/'.join(map(str, pyeongs))}평" if pyeongs else ""
-    title = f"🏠 {keyword}{size} 새 매물 {len(new)}건 ({datetime.now(KST):%m/%d %H:%M})"
-    lines = []
-    for a in new:
-        cname = complexes.get(a["complexNo"], a["name"])
-        p = pyeong_of(a)
-        size_txt = f"{p}평 ({a['area']})" if p else a["area"]
-        head = f"[{a['trade']}] {a['price']} · {cname} {a['building']} {a['floor']}층 · {size_txt}"
-        extra = " · ".join(x for x in (a["direction"], a["desc"], a["realtor"]) if x)
-        lines.append(f"- **{head}**\n  {extra}\n  {article_url(a)}")
-    return title, "\n".join(lines)
+    names = list(dict.fromkeys(complexes.get(a["complexNo"], a["name"]) for a in new))
+    where = names[0] + (f" 외 {len(names) - 1}곳" if len(names) > 1 else "")
+    title = f"🏠{size} 새 매물 {len(new)}건 · {where} ({datetime.now(KST):%m/%d %H:%M})"
+    sections = []
+    for cname in names:
+        lines = [f"### {cname}"]
+        for a in new:
+            if complexes.get(a["complexNo"], a["name"]) != cname:
+                continue
+            p = pyeong_of(a)
+            size_txt = f"{p}평 ({a['area']})" if p else a["area"]
+            head = f"[{a['trade']}] {a['price']} · {a['building']} {a['floor']}층 · {size_txt}"
+            extra = " · ".join(x for x in (a["direction"], a["desc"], a["realtor"]) if x)
+            lines.append(f"- **{head}**\n  {extra}\n  {article_url(a)}")
+        sections.append("\n".join(lines))
+    return title, "\n\n".join(sections)
 
 
 def notify_github(title: str, body: str) -> bool:
@@ -288,7 +295,7 @@ def notify_telegram(title: str, body: str) -> bool:
     token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
     if not (token and chat):
         return False
-    text = f"{title}\n\n{body.replace('**', '')}"
+    text = f"{title}\n\n{body.replace('**', '').replace('### ', '▶ ')}"
     for i in range(0, len(text), 4000):  # 텔레그램 메시지 길이 제한
         data = urllib.parse.urlencode({"chat_id": chat, "text": text[i:i + 4000],
                                        "disable_web_page_preview": "true"}).encode()
@@ -300,44 +307,77 @@ def notify_telegram(title: str, body: str) -> bool:
 
 # ---------------------------------------------------------------- Main
 
+def resolve_complexes(naver: NaverLand, keyword: str, region: str) -> dict:
+    """키워드로 단지를 검색해 {단지번호: 단지명} 을 돌려준다."""
+    queries = [keyword]
+    if " " in keyword:
+        queries.append(re.sub(r"\s+", "", keyword))
+    for q in queries:
+        found = [c for c in naver.search_complexes(q)
+                 if matches_keyword(c["complexName"], keyword)
+                 and (not region or region in c["address"])]
+        if found:
+            for c in found:
+                print(f"단지 발견 [{keyword}]: {c['complexName']} ({c['complexNo']}) {c['address']}")
+            return {c["complexNo"]: c["complexName"] for c in found}
+    return {}
+
+
 def main() -> int:
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    keyword = config["keyword"]
+    keywords: list[str] = config.get("keywords") or [config["keyword"]]
+    region = config.get("region", "")
     trade_types = config.get("trade_types", ["A1", "B1", "B2"])
     pyeongs = [int(p) for p in config.get("pyeong", [])]
     state = load_state()
     naver = NaverLand()
 
+    # 단지 목록: config 의 complexes(수동 지정) + 키워드별 검색 결과(state 에 캐시)
     complexes: dict = {str(k): v for k, v in (config.get("complexes") or {}).items()}
-    if not complexes:
-        complexes = state.get("complexes") or {}
-    if not complexes:
-        found = [c for c in naver.search_complexes(keyword)
-                 if matches_keyword(c["complexName"], keyword)]
+    cache: dict = state.get("keyword_complexes") or {}
+    new_cache: dict = {}
+    for kw in keywords:
+        found = cache.get(kw)
         if not found:
-            print(f"'{keyword}' 단지를 찾지 못했습니다. config.json 의 complexes 를 직접 지정하세요.")
-            return 1
-        complexes = {c["complexNo"]: c["complexName"] for c in found}
-        for c in found:
-            print(f"단지 발견: {c['complexName']} ({c['complexNo']}) {c['address']}")
-    state["complexes"] = complexes
+            try:
+                found = resolve_complexes(naver, kw, region)
+            except Exception as e:  # noqa: BLE001
+                print(f"경고: '{kw}' 단지 검색 실패: {e}", file=sys.stderr)
+        if not found:
+            print(f"경고: '{kw}' 단지를 찾지 못했습니다. config.json 의 complexes 에 단지번호를 직접 지정하세요.")
+            continue
+        new_cache[kw] = found
+        complexes.update(found)
+    state["keyword_complexes"] = new_cache
+    if not complexes:
+        print("감시할 단지가 없습니다.")
+        return 1
 
-    articles: list[dict] = []
-    for no, name in complexes.items():
-        items = naver.articles(no, trade_types)
-        print(f"{name} ({no}): 매물 {len(items)}건")
-        articles += items
+    initialized = set(state.get("initialized_complexes") or [])
 
     now = datetime.now(KST)
-    # 모든 매물을 seen 에 기록하고, 알림은 원하는 평형만 보낸다.
-    new = [a for a in diff_and_update(state, articles, now) if matches_pyeong(a, pyeongs)]
+    new: list[dict] = []
+    ok = 0
+    for no, name in complexes.items():
+        try:
+            items = naver.articles(no, trade_types)
+        except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
+            print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
+            continue
+        ok += 1
+        fresh = diff_and_update(state, items, now)
+        if no in initialized:
+            matched = [a for a in fresh if matches_pyeong(a, pyeongs)]
+            print(f"{name} ({no}): 매물 {len(items)}건, 새 매물 {len(fresh)}건 (조건 일치 {len(matched)}건)")
+            new += matched
+        else:
+            # 처음 보는 단지: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
+            initialized.add(no)
+            print(f"{name} ({no}): 매물 {len(items)}건 기준 저장 (첫 조회, 알림 없음)")
+    state["initialized_complexes"] = sorted(initialized)
 
-    if not state.get("initialized"):
-        # 첫 실행: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
-        state["initialized"] = True
-        print(f"초기화 완료: 기존 매물 {len(articles)}건 저장 (알림 없음)")
-    elif new:
-        title, body = format_message(keyword, new, complexes, pyeongs)
+    if new:
+        title, body = format_message(new, complexes, pyeongs)
         print(title + "\n" + body)
         sent = [n for n, f in (("telegram", notify_telegram), ("github", notify_github))
                 if f(title, body)]
@@ -347,7 +387,7 @@ def main() -> int:
 
     state["last_run"] = now.isoformat(timespec="seconds")
     save_state(state)
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
