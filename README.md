@@ -1,6 +1,6 @@
 # 부산 아파트 25~26평 새 매물 알림
 
-네이버 부동산(fin.land.naver.com)에서 아래 단지들의 **25~26평** 매물을 하루 세 번(8시·13시·20시) 조회하고,
+네이버 부동산(fin.land.naver.com)에서 아래 단지들의 **25~26평** 매물을 하루 세 번(10시·15시·20시) 조회하고,
 새 매물이 올라오면 알림을 보냅니다. 안드로이드 폰의 **Termux**에서 실행합니다.
 
 - 서면아이파크 (1단지·2단지)
@@ -43,15 +43,17 @@ git clone https://github.com/totida/real-estate.git
 cd ~/real-estate && python naver_alert.py      # 첫 실행: 단지별 "기준 저장" 이 나오면 성공
 ```
 
-매일 오전 8시·오후 1시·오후 8시 자동 실행 (Termux 를 한 번 껐다 켠 뒤):
+하루 세 번(10시·15시·20시) 자동 실행 (Termux 를 한 번 껐다 켠 뒤):
 ```bash
 sv-enable crond
-(crontab -l 2>/dev/null | grep -v run-alert; echo "0 8,13,20 * * * $HOME/real-estate/termux/run-alert.sh") | crontab -
+(crontab -l 2>/dev/null | grep -v run-alert; echo "0 10,15,20 * * * $HOME/real-estate/termux/run-alert.sh") | crontab -
 termux-wake-lock
 ```
 
 ## 메일 브리핑
-매일 실행 후 단지별 브리핑 메일을 보냅니다. (신규 매물, 가격 변동, 사라진 매물, 현재 매매 매물 가격순)
+`config.json`의 `mail_hours`(기본 `[10]`, 오전 10시) 실행 때만 단지별 브리핑 메일을 보냅니다.
+지난 메일 이후 여러 번 조회한 변동을 확인 시각과 함께 모두 담습니다.
+(신규 매물, 가격 변동, 사라진 매물, 최근 7일 변동, 현재 매매 매물 가격순)
 단지 이름을 누르면 네이버 부동산의 그 단지 매물 목록이, 매물을 누르면 매물 페이지가 열립니다.
 메일이 설정되면 폰 알림 대신 메일로 받고, 조회·메일 전송 실패만 폰 알림으로 옵니다.
 
@@ -60,6 +62,7 @@ termux-wake-lock
    ```json
    {"SMTP_USER": "내주소@gmail.com", "SMTP_PASSWORD": "앱 비밀번호 16자리", "MAIL_TO": "받을주소@gmail.com"}
    ```
+   받는 주소가 여러 개면 `"MAIL_TO": "a@gmail.com, b@naver.com"` 처럼 쉼표로 구분합니다.
    `MAIL_TO` 를 빼면 보내는 주소로 받습니다. Gmail 이 아니면 `SMTP_HOST`, `SMTP_PORT`(SSL) 를 추가합니다.
 3. `python naver_alert.py --mail-test` 로 테스트 메일을 확인합니다.
 

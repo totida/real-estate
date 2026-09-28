@@ -14,7 +14,8 @@ code=$?
 # 🏠 새 매물 / 📉 사라진 매물 부분만 잘라낸다
 section() { echo "$out" | awk -v m="$1" 'index($0, m) == 1 {f = 1; next} /^(🏠|📉|알림 전송)/ {f = 0} f'; }
 
-mailed=$(echo "$out" | grep -m1 '^메일 전송 완료')
+# 메일을 보냈거나 브리핑 시간이 아니라 생략했으면 폰 알림 대신 메일로 받는다
+mailed=$(echo "$out" | grep -m1 -e '^메일 전송 완료' -e '^메일 전송 생략')
 if [ -z "$mailed" ] && echo "$out" | grep -q '^메일 전송 실패'; then
   termux-notification --id naver-mail --title "브리핑 메일 전송 실패" \
     --content "$(echo "$out" | grep -m1 '^메일 전송 실패' | cut -c1-300)"

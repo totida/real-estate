@@ -881,7 +881,7 @@ def parse_time(iso: str | None) -> datetime | None:
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
-              "first_price", "gone_date")
+              "first_price", "gone_date", "desc", "realtor")
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
 
 
@@ -933,6 +933,12 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
         d = diff_text(prev[2] if len(prev) > 2 else None, cur[2] if len(cur) > 2 else None)
         out.append(f"{stamp_label(cur[0])} {prev[1]} → {cur[1]}" + (f" {d}" if d else ""))
     return out
+
+
+def seen_at(a: dict) -> str:
+    """메일 사이에 여러 번 조회했을 때, 그 변동을 확인한 시각."""
+    at = parse_time(a.get("_at"))
+    return f" · {time_label(at)} 확인" if at else ""
 
 
 def format_briefing(reports: list[dict], label: str, now: datetime,
@@ -1016,10 +1022,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             items = []
             for a in r["new"]:
                 extra = " · ".join(x for x in (a.get("desc", ""), a.get("realtor", "")) if x)
-                text += [f"  - [{a['trade']}] {a['price']} · {where_text(a)}" + (f" · {extra}" if extra else ""),
-                         f"    {article_url(a)}"]
+                text += [f"  - [{a['trade']}] {a['price']} · {where_text(a)}{seen_at(a)}"
+                         + (f" · {extra}" if extra else ""), f"    {article_url(a)}"]
                 items.append(link(article_url(a), f"[{a['trade']}] {a['price']}")
-                             + f" · {esc(where_text(a))}"
+                             + f" · {esc(where_text(a) + seen_at(a))}"
                              + (f'<br><span style="color:#5f6368">{esc(extra)}</span>' if extra else ""))
             section(f"🆕 이번 신규 {len(r['new'])}건", items)
         if r.get("changes"):
@@ -1027,10 +1033,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             items = []
             for c in r["changes"]:
                 d = change_diff(c)
-                text += [f"  - [{c['trade']}] {c['old_price']} → {c['price']} ({d}) · {where_text(c)}",
+                text += [f"  - [{c['trade']}] {c['old_price']} → {c['price']} ({d}) · {where_text(c)}{seen_at(c)}",
                          f"    {article_url(c)}"]
                 items.append(link(article_url(c), f"[{c['trade']}] {c['old_price']} → {c['price']}")
-                             + diff_html(d) + f" · {esc(where_text(c))}")
+                             + diff_html(d) + f" · {esc(where_text(c) + seen_at(c))}")
             section(f"💰 이번 가격 변동 {len(r['changes'])}건", items)
         if r.get("gone"):
             text.append(f"  [사라짐 {len(r['gone'])}건] 거래 완료 또는 중개사가 내림")
@@ -1040,7 +1046,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 posted = f"{days}일 게시" if days is not None else ""
                 first = (f"처음 {g['first_price']}" if g.get("first_price")
                          and g["first_price"] != g.get("price") else "")
-                tail = " · ".join(x for x in (where_text(g), first, posted) if x)
+                tail = " · ".join(x for x in (where_text(g), first, posted) if x) + seen_at(g)
                 text.append(f"  - [{g['trade']}] {g['price']} · {tail}")
                 items.append(f"[{esc(g['trade'])}] {esc(g['price'])} · {esc(tail)}")
             section(f"📉 이번 사라짐 {len(r['gone'])}건 (거래 완료 또는 내림)", items)
@@ -1129,10 +1135,11 @@ def send_mail(subject: str, text: str, html_body: str | None = None) -> str:
     """Gmail 등 SMTP 로 메일을 보내고 받는 주소를 돌려준다.
 
     local.json(또는 환경변수)의 SMTP_USER, SMTP_PASSWORD(Gmail 앱 비밀번호),
-    MAIL_TO(없으면 SMTP_USER), SMTP_HOST(기본 smtp.gmail.com), SMTP_PORT(기본 465) 를 쓴다.
+    MAIL_TO(없으면 SMTP_USER, 쉼표로 여러 주소), SMTP_HOST(기본 smtp.gmail.com), SMTP_PORT(기본 465) 를 쓴다.
     """
     user, password = setting("SMTP_USER"), setting("SMTP_PASSWORD").replace(" ", "")
-    to = setting("MAIL_TO") or user
+    # 받는 주소는 쉼표로 여러 개 적을 수 있다
+    to = ", ".join(x.strip() for x in (setting("MAIL_TO") or user).split(",") if x.strip())
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, user, to
     msg.set_content(text)
@@ -1287,13 +1294,31 @@ def main() -> int:
 
     since = parse_time(state.get("last_run"))
     log_events(state, reports, now, since)
-    if mail_configured():
-        briefing = [dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
-                         no=no, name=name, week=recent_events(state, no, now))
-                    for no, name in complexes.items()]
-        subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now, since)
+    mail_hours = [int(x) for x in config.get("mail_hours") or []]
+    if mail_configured() and mail_hours and now.hour not in mail_hours:
+        print(f"메일 전송 생략: 브리핑 시간({', '.join(map(str, mail_hours))}시)이 아님")
+    elif mail_configured():
+        last_mail = parse_time(state.get("last_mail"))
+        briefing = []
+        for no, name in complexes.items():
+            r = dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
+                     no=no, name=name, week=recent_events(state, no, now))
+            # 지난 메일 이후 여러 번 조회했으면 아직 메일로 안 보낸 변동을 모두 담는다
+            pending = [e for e in r["week"] if not e.get("mailed")][::-1]
+            multi = len({e["at"] for e in pending}) > 1
+            for kind, key in (("new", "new"), ("change", "changes"), ("gone", "gone")):
+                r[key] = [dict(e["item"], _at=e["at"] if multi else None)
+                          for e in pending if e["kind"] == kind]
+            briefing.append(r)
+        subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
+                                                   last_mail or since)
         try:
             print(f"메일 전송 완료: {send_mail(subject, text, html_body)}")
+            state["last_mail"] = now.isoformat(timespec="minutes")
+            shown = {r["no"] for r in briefing if r["status"] != "failed"}  # 실패 단지는 다음 메일에
+            for e in state.get("events") or []:
+                if e["complexNo"] in shown:
+                    e["mailed"] = True
         except Exception as e:  # noqa: BLE001
             print(f"메일 전송 실패: {e}", file=sys.stderr)
 

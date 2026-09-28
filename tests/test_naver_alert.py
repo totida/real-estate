@@ -384,6 +384,46 @@ class MainTest(unittest.TestCase):
         self.assertIn("최근 7일 변동 2건", html_body)  # 신규 1 + 가격 1, 확인 시각과 함께
         self.assertEqual(len(na.load_state()["events"]), 2)
 
+    def run_at(self, fake, hour):
+        class FixedDT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 10, 3, hour, tzinfo=na.KST)
+        orig = na.datetime
+        na.datetime = FixedDT
+        try:
+            return self.run_main(fake)
+        finally:
+            na.datetime = orig
+
+    def test_mail_hours_and_pending(self):
+        orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw",
+                                             "MAIL_TO": "a@example.com, b@example.com"}))
+        na.smtplib.SMTP_SSL = FakeSMTP
+        FakeSMTP.sent = []
+        try:
+            self.cfg.write_text(json.dumps(
+                {"keywords": [], "complexes": {"1": "서면아이파크1단지"}, "pyeong": [25],
+                 "mail_hours": [10]}, ensure_ascii=False))
+            fake = FakeNaver({"1": [dict(art(1), price_won=800_000_000)]})
+            self.run_at(fake, 8)       # 기준 저장, 메일 시간 아님
+            fake.listings["1"].append(dict(art(2), price_won=810_000_000))
+            self.run_at(fake, 9)       # 신규 확인, 메일 시간 아님
+            fake.listings["1"][0] = dict(art(1), price="7억", price_won=700_000_000)
+            self.run_at(fake, 10)      # 가격 변동 확인 + 메일
+            self.run_at(fake, 11)      # 메일 시간 아님
+        finally:
+            na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
+        msgs = [m[1] for m in FakeSMTP.sent if m[0] == "msg"]
+        self.assertEqual(len(msgs), 1)  # 10시에만
+        self.assertEqual(msgs[0]["To"], "a@example.com, b@example.com")
+        self.assertIn("신규 1 · 가격변동 1", msgs[0]["Subject"])  # 9시 신규도 10시 메일에
+        body = msgs[0].get_body(("html",)).get_content()
+        self.assertIn("10/03 오전 9시 확인", body)
+        self.assertTrue(all(e.get("mailed") for e in na.load_state()["events"]))
+
     def test_gone_history(self):
         import contextlib
         import io
