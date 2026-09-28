@@ -56,6 +56,37 @@ class DiffTest(unittest.TestCase):
             self.assertEqual(na.track_listings(state, "2", [], day), [])
         self.assertIn("1", state["tracked"])
 
+    def test_track_price_change(self):
+        state, changes = {}, []
+        na.track_listings(state, "1", [dict(art(1), price_won=800_000_000)], "2026-09-28", changes=changes)
+        cut = dict(art(1), price="7억 5,000만", price_won=750_000_000)
+        na.track_listings(state, "1", [cut], "2026-09-29", changes=changes)
+        self.assertEqual(len(changes), 1)
+        c = changes[0]
+        self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
+        self.assertEqual(na.change_diff(c), "▼5,000만")
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만"])
+        # 같은 가격이면 변동 없음
+        na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
+        self.assertEqual(len(changes), 1)
+
+    def test_track_representative_switch_not_price_change(self):
+        # 같은 집을 다른 중개사가 다른 호가로 올린 것으로 대표 매물이 바뀐 경우
+        state, changes = {}, []
+        na.track_listings(state, "1", [dict(art(1), aliases=["2"], price_won=800_000_000)],
+                          "2026-09-28", changes=changes)
+        na.track_listings(state, "1", [dict(art(2), aliases=["1"], price_won=780_000_000)],
+                          "2026-09-29", changes=changes)
+        self.assertEqual(changes, [])
+        na.track_listings(state, "1", [dict(art(2), aliases=["1"], price_won=770_000_000)],
+                          "2026-09-30", changes=changes)
+        self.assertEqual(len(changes), 1)  # 그 뒤 같은 중개사 매물의 변동은 잡는다
+
+    def test_rent_only_change(self):
+        c = {"old_price_won": 50_000_000, "price_won": 50_000_000,
+             "old_rent_won": 1_500_000, "rent_won": 1_400_000}
+        self.assertEqual(na.change_diff(c), "월세 ▼10만")
+
     def test_track_filter_change_not_gone(self):
         state = {}
         na.track_listings(state, "1", [art(1)], "2026-09-28")
@@ -327,6 +358,30 @@ class MainTest(unittest.TestCase):
         self.assertIn("연산더샵", self.sent[1][0])
 
 
+    def test_briefing_mail_sent(self):
+        orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw"}))
+        na.smtplib.SMTP_SSL = FakeSMTP
+        FakeSMTP.sent = []
+        try:
+            self.cfg.write_text(json.dumps(
+                {"keywords": [], "complexes": {"1": "서면아이파크1단지", "blocked": "양정"},
+                 "pyeong": [25]}, ensure_ascii=False))
+            fake = FakeNaver({"1": [dict(art(1), price_won=800_000_000)]})
+            self.run_main(fake)
+            fake.listings["1"] = [dict(art(1), price="7억", price_won=700_000_000),
+                                  dict(art(2), price_won=810_000_000)]
+            self.run_main(fake)
+        finally:
+            na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
+        msgs = [m[1] for m in FakeSMTP.sent if m[0] == "msg"]
+        self.assertEqual(len(msgs), 2)  # 매일 한 통
+        self.assertIn("신규 1 · 가격변동 1", msgs[1]["Subject"])
+        html_body = msgs[1].get_body(("html",)).get_content()
+        self.assertIn("8억 → 7억", html_body)
+        self.assertIn("조회 실패", html_body)  # 차단된 단지도 브리핑에 표시
+
     def test_gone_history(self):
         import contextlib
         import io
@@ -348,6 +403,88 @@ class MainTest(unittest.TestCase):
             na.print_history()
         self.assertIn("서면아이파크1단지 · [매매] 8억 · 101동 10층 (총 30층) · 25평", out.getvalue())
         self.assertNotIn("2", na.load_state()["tracked"])
+
+
+class BriefingTest(unittest.TestCase):
+    def test_format_briefing(self):
+        listing = dict(art(5, "7"), price_won=800_000_000, first_price_won=850_000_000,
+                       first_seen="2026-09-28")
+        change = dict(listing, old_price="8억 5,000만", old_price_won=850_000_000, old_rent_won=None)
+        reports = [
+            {"no": "7", "name": "서면아이파크2단지", "status": "ok", "listings": [listing],
+             "new": [dict(art(6, "7"), price_won=790_000_000)], "changes": [change], "gone": []},
+            {"no": "8", "name": "연산더샵", "status": "first", "listings": [], "gone": [], "changes": []},
+            {"no": "9", "name": "양정", "status": "failed", "error": "429"},
+        ]
+        subject, text, body = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, tzinfo=na.KST))
+        self.assertEqual(subject, "[매물 브리핑] 10/03 25~26평 · 신규 1 · 가격변동 1 · 사라짐 0")
+        self.assertIn('href="https://fin.land.naver.com/complexes/7?tab=article"', body)  # 단지 링크
+        self.assertIn('href="https://fin.land.naver.com/articles/6"', body)  # 신규 매물 링크
+        self.assertIn("8억 5,000만 → 8억", body)
+        self.assertIn("▼5,000만", body)
+        self.assertIn("첫 조회", text)
+        self.assertIn("조회 실패: 429", text)
+
+    def test_html_escaped(self):
+        r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}
+        _, _, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))
+        self.assertNotIn("<script>", body)
+        self.assertIn("&lt;b&gt;단지", body)
+
+
+class FakeSMTP:
+    sent = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host, self.port = host, port
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def login(self, user, password):
+        self.login_args = (user, password)
+        FakeSMTP.sent.append(("login", user, password))
+
+    def send_message(self, msg):
+        FakeSMTP.sent.append(("msg", msg))
+
+
+class MailTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp())
+        self.orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.smtplib.SMTP_SSL = FakeSMTP
+        FakeSMTP.sent = []
+
+    def tearDown(self):
+        na.LOCAL_PATH, na.smtplib.SMTP_SSL = self.orig
+
+    def test_not_configured(self):
+        self.assertFalse(na.mail_configured())
+
+    def test_send_mail_from_local_json(self):
+        na.LOCAL_PATH.write_text(json.dumps(
+            {"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "abcd efgh ijkl mnop"}))
+        self.assertTrue(na.mail_configured())
+        self.assertEqual(na.send_mail("제목", "본문", "<p>본문</p>"), "me@example.com")
+        self.assertEqual(FakeSMTP.sent[0], ("login", "me@example.com", "abcdefghijklmnop"))
+        msg = FakeSMTP.sent[1][1]
+        self.assertEqual((msg["To"], msg["Subject"]), ("me@example.com", "제목"))
+        self.assertIn("<p>본문</p>", msg.get_body(("html",)).get_content())
+
+    def test_env_overrides_local_json(self):
+        na.LOCAL_PATH.write_text(json.dumps({"MAIL_TO": "a@example.com"}))
+        na.os.environ["MAIL_TO"] = "b@example.com"
+        try:
+            self.assertEqual(na.setting("MAIL_TO"), "b@example.com")
+        finally:
+            del na.os.environ["MAIL_TO"]
+        self.assertEqual(na.setting("MAIL_TO"), "a@example.com")
 
 
 class ChromiumIntegrationTest(unittest.TestCase):

@@ -21,7 +21,8 @@
    한 건으로 묶어서 대표 매물이 바뀌어도 새 매물로 보지 않습니다.
 3. 새 매물 중 **25~26평**(`config.json`의 `pyeong`)인 것만 알림을 보냅니다.
    - **폰 알림**: `termux/run-alert.sh` 가 Termux 알림을 띄웁니다. (누르면 매물 페이지 열림)
-   - **텔레그램** (선택): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 환경변수가 있으면 보냅니다.
+   - **메일 브리핑**: 아래 "메일 브리핑" 설정 시 매일 단지별 브리핑 메일을 보냅니다.
+   - **텔레그램** (선택): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 가 설정돼 있으면 보냅니다.
    - **GitHub 이슈** (선택): `GITHUB_TOKEN`, `GITHUB_REPOSITORY` 환경변수가 있으면 만듭니다.
 4. 조건에 맞는 매물이 목록에서 **사라지면**(거래 완료 또는 중개사가 내림) 기록하고 알립니다.
    하루 누락일 수 있어 2번 연속 안 보이면 사라진 것으로 보고, 사라진 날은 처음 안 보인 날로 적습니다.
@@ -49,6 +50,19 @@ sv-enable crond
 termux-wake-lock
 ```
 
+## 메일 브리핑
+매일 실행 후 단지별 브리핑 메일을 보냅니다. (신규 매물, 가격 변동, 사라진 매물, 현재 매매 매물 가격순)
+단지 이름을 누르면 네이버 부동산의 그 단지 매물 목록이, 매물을 누르면 매물 페이지가 열립니다.
+메일이 설정되면 폰 알림 대신 메일로 받고, 조회·메일 전송 실패만 폰 알림으로 옵니다.
+
+1. Gmail 계정에서 2단계 인증을 켜고 [앱 비밀번호](https://myaccount.google.com/apppasswords)를 만듭니다 (16자리).
+2. 폰의 `~/real-estate/local.json` 에 적습니다. (git 에 올라가지 않습니다)
+   ```json
+   {"SMTP_USER": "내주소@gmail.com", "SMTP_PASSWORD": "앱 비밀번호 16자리", "MAIL_TO": "받을주소@gmail.com"}
+   ```
+   `MAIL_TO` 를 빼면 보내는 주소로 받습니다. Gmail 이 아니면 `SMTP_HOST`, `SMTP_PORT`(SSL) 를 추가합니다.
+3. `python naver_alert.py --mail-test` 로 테스트 메일을 확인합니다.
+
 ## 설정
 - **단지 추가/삭제**: `config.json`의 `complexes`를 수정합니다.
   단지번호는 `fin.land.naver.com/complexes/<단지번호>` URL에서 확인할 수 있습니다.
@@ -58,6 +72,7 @@ termux-wake-lock
 - **평형**: `"pyeong": [25, 26]` 네이버 표기와 같이 공급면적 기준(㎡ ÷ 3.3058, 반올림)입니다.
   여러 평형은 `[25, 34]`, 전체는 `[]`로 설정합니다.
 - **거래 유형**: `trade_types`: `A1` 매매, `B1` 전세, `B2` 월세
+- **텔레그램** (선택): `local.json` 에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 를 적습니다.
 - **크로미움 옵션** (환경변수):
   - `CHROMIUM` 실행 파일 경로 직접 지정
   - `CHROMIUM_XVFB=1` 화면 없는 모드 대신 가상 화면(Xvfb)에서 실행

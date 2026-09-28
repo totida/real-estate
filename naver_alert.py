@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import base64
 import csv
+import html
 import json
 import os
 import re
 import shutil
+import smtplib
 import socket
 import subprocess
 import sys
@@ -21,13 +23,17 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import Counter
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state" / "seen.json"
 HISTORY_PATH = ROOT / "state" / "history.csv"
+# 메일·텔레그램 계정 같은 비밀값. 저장소가 공개라 git 에 올리지 않는다 (.gitignore).
+LOCAL_PATH = ROOT / "local.json"
 
 KST = timezone(timedelta(hours=9))
 M2_PER_PYEONG = 3.305785
@@ -36,6 +42,17 @@ UA = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 TRADE_NAMES = {"A1": "매매", "B1": "전세", "B2": "월세", "B3": "단기임대"}
+
+
+def setting(name: str, default: str = "") -> str:
+    """환경변수, 없으면 local.json 에서 설정값을 읽는다 (cron 에서는 ~/.bashrc 가 안 읽히므로)."""
+    if os.getenv(name):
+        return os.environ[name]
+    try:
+        value = json.loads(LOCAL_PATH.read_text(encoding="utf-8")).get(name)
+    except (OSError, ValueError):
+        value = None
+    return str(value) if value else default
 
 
 # ---------------------------------------------------------------- HTTP
@@ -463,6 +480,13 @@ def won_text(v) -> str:
     return f"{eok}억" if eok else f"{man:,}만"
 
 
+def won_int(v) -> int | None:
+    try:
+        return int(float(str(v).replace(",", ""))) or None
+    except (TypeError, ValueError):
+        return None
+
+
 def fin_price(p: dict) -> str:
     main = p.get("dealPrice") or p.get("warrantyPrice") or p.get("depositPrice")
     txt = won_text(main) if main else ""
@@ -486,13 +510,17 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
         realtor = f"{realtor} 외 {count - 1}곳"
     trade = a.get("tradeType", "")
     dong = str(a.get("dongName") or "")
+    price = a.get("priceInfo") or {}
     return {
         "articleNo": no,
         "aliases": aliases,
         "complexNo": complex_no,
         "name": a.get("complexName", ""),
         "trade": TRADE_NAMES.get(trade, trade),
-        "price": fin_price(a.get("priceInfo") or {}),
+        "price": fin_price(price),
+        "price_won": won_int(price.get("dealPrice") or price.get("warrantyPrice")
+                             or price.get("depositPrice")),
+        "rent_won": won_int(price.get("rentPrice")),
         "building": dong + "동" if dong.isdigit() else dong,
         "floor": detail.get("floorInfo", ""),
         "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
@@ -564,6 +592,10 @@ def article_url(a: dict) -> str:
     return f"https://fin.land.naver.com/articles/{a['articleNo']}"
 
 
+def complex_url(complex_no: str) -> str:
+    return f"https://fin.land.naver.com/complexes/{complex_no}?tab=article"
+
+
 def matches_keyword(name: str, keyword: str) -> bool:
     """키워드의 모든 단어가 단지명에 들어 있으면 일치 (띄어쓰기·순서 무시)."""
     squashed = re.sub(r"\s+", "", name).lower()
@@ -607,14 +639,17 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
     return new
 
 
-TRACK_KEYS = ("complexNo", "name", "trade", "price", "building", "floor", "area",
-              "supply", "exclusive", "realtor")
+TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "building",
+              "floor", "area", "supply", "exclusive", "realtor")
 
 
 def track_listings(state: dict, complex_no: str, articles: list[dict], today: str,
-                   wanted=lambda a: True, misses_to_gone: int = 2) -> list[dict]:
+                   wanted=lambda a: True, changes: list | None = None,
+                   misses_to_gone: int = 2) -> list[dict]:
     """조건(wanted)에 맞는 매물을 추적하고, 목록에서 사라진 매물을 돌려준다.
 
+    가격이 바뀐 매물은 changes 에 담는다. 같은 집이라도 대표 매물(중개사)이 바뀌면
+    중개사마다 호가가 달라 가격 변동으로 보지 않는다.
     있는지 여부는 조건과 상관없이 단지의 전체 매물(articles)로 판단한다
     (평형 조건을 바꿔도 조건에서 빠진 매물이 '사라진 매물' 로 기록되지 않도록).
     조회에 성공한 단지에 대해서만 부른다. 한 번 빠진 것은 일시적 누락일 수 있어
@@ -634,7 +669,17 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         cur = next((by_id[i] for i in (key, *t.get("aliases", [])) if i in by_id), None)
         if cur is not None:
             matched_today.add(id(cur))
+            before = dict(t)
             t.update({k: cur.get(k) for k in TRACK_KEYS}, complexNo=complex_no)
+            old, now_ = ((before.get("price_won"), before.get("rent_won")),
+                         (t.get("price_won"), t.get("rent_won")))
+            if (cur["articleNo"] == before.get("rep", key) and old[0] and now_[0]
+                    and old != now_):
+                t["price_history"] = [*before.get("price_history", []), [today, t["price"]]][-10:]
+                if changes is not None:
+                    changes.append(dict(t, articleNo=cur["articleNo"], old_price=before.get("price"),
+                                        old_price_won=old[0], old_rent_won=old[1]))
+            t["rep"] = cur["articleNo"]
             t["aliases"] = sorted(set(t.get("aliases", [])) | {cur["articleNo"], *cur.get("aliases", [])}
                                   - {key})
             t["last_seen"], t["missed"] = today, 0
@@ -650,8 +695,11 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                 or any(i in tracked for i in (a["articleNo"], *a.get("aliases", [])))):
             continue
         tracked[a["articleNo"]] = dict({k: a.get(k) for k in TRACK_KEYS}, complexNo=complex_no,
-                                       aliases=a.get("aliases", []), first_seen=today,
-                                       first_price=a.get("price"), last_seen=today, missed=0)
+                                       aliases=a.get("aliases", []), rep=a["articleNo"],
+                                       first_seen=today, first_price=a.get("price"),
+                                       first_price_won=a.get("price_won"),
+                                       price_history=[[today, a.get("price")]],
+                                       last_seen=today, missed=0)
     return gone
 
 
@@ -763,7 +811,7 @@ def notify_github(title: str, body: str) -> bool:
 
 
 def notify_telegram(title: str, body: str) -> bool:
-    token, chat = os.getenv("TELEGRAM_BOT_TOKEN"), os.getenv("TELEGRAM_CHAT_ID")
+    token, chat = setting("TELEGRAM_BOT_TOKEN"), setting("TELEGRAM_CHAT_ID")
     if not (token and chat):
         return False
     text = f"{title}\n\n{body.replace('**', '').replace('### ', '▶ ')}"
@@ -774,6 +822,207 @@ def notify_telegram(title: str, body: str) -> bool:
                 f"https://api.telegram.org/bot{token}/sendMessage", data=data, timeout=20):
             pass
     return True
+
+
+# ---------------------------------------------------------------- Mail briefing
+
+def diff_text(old: int | None, new: int | None) -> str:
+    if not old or not new or old == new:
+        return ""
+    return f"{'▲' if new > old else '▼'}{won_text(abs(new - old))}"
+
+
+def change_diff(c: dict) -> str:
+    """가격 변동 폭. 보증금/매매가가 같고 월세만 바뀌었으면 월세 변동을 보여준다."""
+    d = diff_text(c.get("old_price_won"), c.get("price_won"))
+    if d:
+        return d
+    d = diff_text(c.get("old_rent_won"), c.get("rent_won"))
+    return f"월세 {d}" if d else ""
+
+
+def where_text(a: dict) -> str:
+    p = pyeong_of(a)
+    size = f"{p}평" if p else a.get("area", "")
+    place = " ".join(x for x in (a.get("building", ""), floor_text(a.get("floor", ""))) if x)
+    return " · ".join(x for x in (place, size) if x)
+
+
+def trade_summary(listings: list[dict]) -> str:
+    counts = Counter(a["trade"] for a in listings)
+    parts = [f"{t} {counts[t]}" for t in ("매매", "전세", "월세") if counts[t]]
+    parts += [f"{t} {n}" for t, n in counts.items() if t not in ("매매", "전세", "월세")]
+    text = f"매물 {len(listings)}건" + (f" ({' · '.join(parts)})" if parts else "")
+    sale = sorted(a["price_won"] for a in listings if a["trade"] == "매매" and a.get("price_won"))
+    if sale:
+        text += f" · 매매 {won_text(sale[0])}" + (f"~{won_text(sale[-1])}" if sale[-1] != sale[0] else "")
+    return text
+
+
+def sale_rows(r: dict) -> list[dict]:
+    """현재 매매 매물을 가격순으로. 처음 본 가격 대비 변동을 붙인다."""
+    rows = [a for a in r.get("listings", []) if a["trade"] == "매매"]
+    return sorted(rows, key=lambda a: a.get("price_won") or 0)
+
+
+def format_briefing(reports: list[dict], label: str, now: datetime) -> tuple[str, str, str]:
+    """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문)."""
+    ok = [r for r in reports if r["status"] != "failed"]
+    n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
+    day = f"{now:%m/%d}"
+    subject = (f"[매물 브리핑] {day} {label} · 신규 {n_new} · 가격변동 {n_chg} · 사라짐 {n_gone}"
+               if ok else f"[매물 브리핑] {day} 조회 실패")
+    esc = html.escape
+
+    def link(url: str, text: str) -> str:
+        return f'<a href="{esc(url)}" style="color:#0b57d0;text-decoration:none">{esc(text)}</a>'
+
+    red, blue = "#c5221f", "#1a56db"
+
+    def diff_html(d: str) -> str:
+        if not d:
+            return ""
+        return f' <b style="color:{red if "▲" in d else blue}">{esc(d)}</b>'
+
+    text: list[str] = [f"{day} 매물 브리핑 ({label})", ""]
+    h: list[str] = [
+        '<div style="font-family:-apple-system,Roboto,\'Noto Sans KR\',sans-serif;font-size:14px;'
+        'line-height:1.5;color:#1f1f1f;max-width:720px;word-break:keep-all">',
+        f'<h2 style="font-size:19px;margin:0 0 4px">{esc(day)} 매물 브리핑</h2>',
+        f'<div style="color:#5f6368;margin-bottom:12px">{esc(label)} · 신규 {n_new} · '
+        f'가격변동 {n_chg} · 사라짐 {n_gone} · 단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다</div>',
+        '<table width="100%" cellpadding="6" style="border-collapse:collapse;font-size:13px;'
+        'margin-bottom:8px;width:100%">',
+        '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">단지</th><th>매물</th>'
+        '<th>신규</th><th>변동</th><th>사라짐</th></tr>',
+    ]
+    for r in reports:
+        cells = (["조회 실패", "", "", ""] if r["status"] == "failed" else
+                 [str(len(r.get("listings", []))), str(len(r.get("new", []))),
+                  str(len(r.get("changes", []))), str(len(r.get("gone", [])))])
+        h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}</td>'
+                 + "".join(f'<td align="center" style="white-space:nowrap">{esc(c)}</td>'
+                           for c in cells) + "</tr>")
+    h.append("</table>")
+
+    def section(title: str, items: list[str]) -> None:
+        h.append(f'<div style="font-weight:600;margin:10px 0 2px">{esc(title)}</div>'
+                 '<ul style="margin:0;padding-left:18px">' + "".join(f"<li>{i}</li>" for i in items)
+                 + "</ul>")
+
+    for r in reports:
+        url = complex_url(r["no"])
+        text += [f"■ {r['name']}", f"  {url}"]
+        h.append(f'<h3 style="font-size:16px;margin:24px 0 2px;padding-top:12px;'
+                 f'border-top:2px solid #1f1f1f">{link(url, r["name"])}</h3>')
+        if r["status"] == "failed":
+            text += [f"  조회 실패: {r.get('error', '')}", ""]
+            h.append(f'<div style="color:{red}">조회 실패: {esc(r.get("error", ""))}</div>')
+            continue
+        summary = trade_summary(r.get("listings", []))
+        text.append(f"  {label} {summary}")
+        h.append(f'<div style="color:#5f6368">{esc(label)} {esc(summary)}</div>')
+        if r["status"] == "first":
+            msg = "첫 조회라 오늘 매물을 기준으로 저장했습니다. 다음 브리핑부터 변동을 알려드립니다."
+            text.append(f"  {msg}")
+            h.append(f"<div>{esc(msg)}</div>")
+        if r.get("new"):
+            text.append(f"  [신규 {len(r['new'])}건]")
+            items = []
+            for a in r["new"]:
+                extra = " · ".join(x for x in (a.get("desc", ""), a.get("realtor", "")) if x)
+                text += [f"  - [{a['trade']}] {a['price']} · {where_text(a)}" + (f" · {extra}" if extra else ""),
+                         f"    {article_url(a)}"]
+                items.append(link(article_url(a), f"[{a['trade']}] {a['price']}")
+                             + f" · {esc(where_text(a))}"
+                             + (f'<br><span style="color:#5f6368">{esc(extra)}</span>' if extra else ""))
+            section(f"🆕 신규 {len(r['new'])}건", items)
+        if r.get("changes"):
+            text.append(f"  [가격 변동 {len(r['changes'])}건]")
+            items = []
+            for c in r["changes"]:
+                d = change_diff(c)
+                text += [f"  - [{c['trade']}] {c['old_price']} → {c['price']} ({d}) · {where_text(c)}",
+                         f"    {article_url(c)}"]
+                items.append(link(article_url(c), f"[{c['trade']}] {c['old_price']} → {c['price']}")
+                             + diff_html(d) + f" · {esc(where_text(c))}")
+            section(f"💰 가격 변동 {len(r['changes'])}건", items)
+        if r.get("gone"):
+            text.append(f"  [사라짐 {len(r['gone'])}건] 거래 완료 또는 중개사가 내림")
+            items = []
+            for g in r["gone"]:
+                days = days_between(g.get("first_seen"), g.get("gone_date"))
+                posted = f"{days}일 게시" if days is not None else ""
+                first = (f"처음 {g['first_price']}" if g.get("first_price")
+                         and g["first_price"] != g.get("price") else "")
+                tail = " · ".join(x for x in (where_text(g), first, posted) if x)
+                text.append(f"  - [{g['trade']}] {g['price']} · {tail}")
+                items.append(f"[{esc(g['trade'])}] {esc(g['price'])} · {esc(tail)}")
+            section(f"📉 사라짐 {len(r['gone'])}건 (거래 완료 또는 내림)", items)
+        if r["status"] == "ok" and not (r.get("new") or r.get("changes") or r.get("gone")):
+            text.append("  변동 없음")
+            h.append('<div style="color:#5f6368;margin-top:6px">변동 없음</div>')
+        rows = sale_rows(r)
+        if rows:
+            text.append(f"  [현재 매매 {len(rows)}건, 가격순 · 변동은 처음 본 가격 대비]")
+            h.append(f'<div style="font-weight:600;margin:10px 0 2px">현재 매매 {len(rows)}건 '
+                     '<span style="font-weight:400;color:#5f6368">(가격순 · 변동은 처음 본 가격 대비, '
+                     '등록은 처음 본 날)</span></div>'
+                     '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:13px;'
+                     'width:100%">'
+                     '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">가격</th>'
+                     '<th align="left">동·층</th><th>평</th><th>변동</th><th>등록</th></tr>')
+            for a in rows:
+                d = diff_text(a.get("first_price_won"), a.get("price_won"))
+                seen = (a.get("first_seen") or "")[5:].replace("-", "/")
+                place = " ".join(x for x in (a.get("building", ""), a.get("floor", "")) if x)
+                place += "층" if a.get("floor") else ""
+                p = pyeong_of(a)
+                text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else ""))
+                h.append(f'<tr style="border-top:1px solid #eee">'
+                         f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}</td>'
+                         f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
+                         f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
+                         f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
+            h.append("</table>")
+        text.append("")
+    h.append('<p style="color:#9aa0a6;font-size:12px;margin-top:24px">사라짐은 이틀 연속 목록에 없던 매물입니다. '
+             '거래 완료인지 중개사가 내린 것인지는 구분할 수 없습니다.</p></div>')
+    return subject, "\n".join(text), "".join(h)
+
+
+def mail_configured() -> bool:
+    return bool(setting("SMTP_USER") and setting("SMTP_PASSWORD"))
+
+
+def send_mail(subject: str, text: str, html_body: str | None = None) -> str:
+    """Gmail 등 SMTP 로 메일을 보내고 받는 주소를 돌려준다.
+
+    local.json(또는 환경변수)의 SMTP_USER, SMTP_PASSWORD(Gmail 앱 비밀번호),
+    MAIL_TO(없으면 SMTP_USER), SMTP_HOST(기본 smtp.gmail.com), SMTP_PORT(기본 465) 를 쓴다.
+    """
+    user, password = setting("SMTP_USER"), setting("SMTP_PASSWORD").replace(" ", "")
+    to = setting("MAIL_TO") or user
+    msg = EmailMessage()
+    msg["Subject"], msg["From"], msg["To"] = subject, user, to
+    msg.set_content(text)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
+    with smtplib.SMTP_SSL(setting("SMTP_HOST", "smtp.gmail.com"),
+                          int(setting("SMTP_PORT", "465")), timeout=30) as smtp:
+        smtp.login(user, password)
+        smtp.send_message(msg)
+    return to
+
+
+def tracked_info(state: dict, a: dict) -> dict:
+    """현재 매물에 추적 기록(처음 본 날·처음 가격)을 붙인다."""
+    ids = {a["articleNo"], *a.get("aliases", [])}
+    for key, t in (state.get("tracked") or {}).items():
+        if ids & {key, t.get("rep"), *t.get("aliases", [])}:
+            return dict(a, first_seen=t.get("first_seen"), first_price=t.get("first_price"),
+                        first_price_won=t.get("first_price_won"))
+    return a
 
 
 # ---------------------------------------------------------------- Main
@@ -797,6 +1046,13 @@ def resolve_complexes(naver: NaverLand, keyword: str, region: str) -> dict:
 def main() -> int:
     if sys.argv[1:2] == ["--history"]:
         return print_history(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
+    if sys.argv[1:2] == ["--mail-test"]:
+        if not mail_configured():
+            print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")
+            return 1
+        to = send_mail("[매물 브리핑] 메일 설정 확인", "메일 설정이 잘 됐습니다. 매일 브리핑이 이 주소로 옵니다.")
+        print(f"테스트 메일을 보냈습니다: {to}")
+        return 0
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     keywords: list[str] = config.get("keywords") or ([config["keyword"]] if config.get("keyword") else [])
     region = config.get("region", "")
@@ -836,7 +1092,10 @@ def main() -> int:
     today = now.strftime("%Y-%m-%d")
     new: list[dict] = []
     gone: list[dict] = []
+    reports: dict = {}  # 단지번호 → 브리핑 내용
+    wanted = lambda a: matches_pyeong(a, pyeongs)  # noqa: E731
     ok = 0
+    abort = ""
     try:
         for i, (no, name) in enumerate(complexes.items()):
             if i:
@@ -845,21 +1104,30 @@ def main() -> int:
                 items = naver.articles(no, trade_types)
             except (BlockedError, BrowserError) as e:
                 print(f"경고: {name} ({no}) 조회 실패, 나머지 단지도 건너뜁니다: {e}", file=sys.stderr)
+                abort = str(e)
                 break
             except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
                 print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
+                reports[no] = {"status": "failed", "error": str(e)}
                 continue
             ok += 1
             fresh = diff_and_update(state, items, now)
-            gone += track_listings(state, no, items, today, lambda a: matches_pyeong(a, pyeongs))
+            changes: list[dict] = []
+            lost = track_listings(state, no, items, today, wanted, changes)
+            gone += lost
+            report = {"status": "ok", "gone": lost, "changes": changes,
+                      "listings": [tracked_info(state, a) for a in items if wanted(a)]}
             if no in initialized:
-                matched = [a for a in fresh if matches_pyeong(a, pyeongs)]
+                matched = [a for a in fresh if wanted(a)]
                 print(f"{name} ({no}): 매물 {len(items)}건, 새 매물 {len(fresh)}건 (조건 일치 {len(matched)}건)")
                 new += matched
+                report["new"] = matched
             else:
                 # 처음 보는 단지: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
                 initialized.add(no)
                 print(f"{name} ({no}): 매물 {len(items)}건 기준 저장 (첫 조회, 알림 없음)")
+                report["status"] = "first"
+            reports[no] = report
     finally:
         naver.close()
     state["initialized_complexes"] = sorted(initialized)
@@ -884,6 +1152,15 @@ def main() -> int:
         print(title + "\n" + body)
         for f in (notify_telegram, notify_github):
             f(title, body)
+
+    if mail_configured():
+        briefing = [dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
+                         no=no, name=name) for no, name in complexes.items()]
+        subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now)
+        try:
+            print(f"메일 전송 완료: {send_mail(subject, text, html_body)}")
+        except Exception as e:  # noqa: BLE001
+            print(f"메일 전송 실패: {e}", file=sys.stderr)
 
     state["last_run"] = now.isoformat(timespec="seconds")
     save_state(state)
