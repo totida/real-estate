@@ -92,6 +92,26 @@ class ParseTest(unittest.TestCase):
         self.assertIn("서면아이파크2단지", body)
 
 
+class RetryDelayTest(unittest.TestCase):
+    def http_error(self, code, headers=None):
+        import email.message
+        import urllib.error
+        msg = email.message.Message()
+        for k, v in (headers or {}).items():
+            msg[k] = v
+        return urllib.error.HTTPError("https://x", code, "err", msg, None)
+
+    def test_429_waits_longer(self):
+        self.assertEqual(na.retry_delay(self.http_error(429), 0), 20)
+        self.assertEqual(na.retry_delay(self.http_error(429), 1), 40)
+
+    def test_429_honors_retry_after(self):
+        self.assertEqual(na.retry_delay(self.http_error(429, {"Retry-After": "7"}), 0), 7)
+
+    def test_other_errors_short(self):
+        self.assertEqual(na.retry_delay(self.http_error(500), 0), 2)
+
+
 class FakeNaver:
     def __init__(self, listings):
         self.listings = listings  # {complexNo: [articles]}
@@ -124,6 +144,7 @@ class MainTest(unittest.TestCase):
             (na, "CONFIG_PATH", self.cfg), (na, "STATE_PATH", self.state),
             (na, "notify_github", lambda t, b: self.sent.append((t, b)) or True),
             (na, "notify_telegram", lambda t, b: False),
+            (na.time, "sleep", lambda s: None),
         ]
         self.orig = [(m, n, getattr(m, n)) for m, n, _ in self.patches]
         for m, n, v in self.patches:

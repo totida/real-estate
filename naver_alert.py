@@ -33,6 +33,16 @@ TRADE_NAMES = {"A1": "매매", "B1": "전세", "B2": "월세", "B3": "단기임�
 
 # ---------------------------------------------------------------- HTTP
 
+def retry_delay(err: Exception, attempt: int) -> float:
+    """재시도 전 대기 시간(초). 429(요청 과다)는 Retry-After 를 따르거나 길게 쉰다."""
+    if isinstance(err, urllib.error.HTTPError) and err.code == 429:
+        try:
+            return min(float(err.headers.get("Retry-After", "")), 120)
+        except (TypeError, ValueError):
+            return 20 * (attempt + 1)
+    return 2 * (attempt + 1)
+
+
 def http_get(url: str, headers: dict | None = None, retries: int = 3) -> str:
     hdrs = {"User-Agent": UA, "Accept-Language": "ko-KR,ko;q=0.9"}
     hdrs.update(headers or {})
@@ -44,7 +54,8 @@ def http_get(url: str, headers: dict | None = None, retries: int = 3) -> str:
                 return resp.read().decode("utf-8")
         except (urllib.error.URLError, TimeoutError) as e:
             last_err = e
-            time.sleep(2 * (attempt + 1))
+            if attempt < retries - 1:
+                time.sleep(retry_delay(e, attempt))
     raise RuntimeError(f"GET {url} failed: {last_err}")
 
 
@@ -336,9 +347,13 @@ def main() -> int:
     complexes: dict = {str(k): v for k, v in (config.get("complexes") or {}).items()}
     cache: dict = state.get("keyword_complexes") or {}
     new_cache: dict = {}
+    searched = False
     for kw in keywords:
         found = cache.get(kw)
         if not found:
+            if searched:
+                time.sleep(3)  # 연속 검색으로 429(요청 과다)가 나지 않도록 간격을 둔다
+            searched = True
             try:
                 found = resolve_complexes(naver, kw, region)
             except Exception as e:  # noqa: BLE001
@@ -358,7 +373,9 @@ def main() -> int:
     now = datetime.now(KST)
     new: list[dict] = []
     ok = 0
-    for no, name in complexes.items():
+    for i, (no, name) in enumerate(complexes.items()):
+        if i:
+            time.sleep(3)  # 단지 사이 간격 (429 방지)
         try:
             items = naver.articles(no, trade_types)
         except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
