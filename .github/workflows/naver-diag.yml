@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: 엔드포인트별 응답 확인
+        shell: bash {0}
         run: |
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
           for url in \
@@ -18,6 +19,7 @@ jobs:
             "https://m.land.naver.com/search/result/%EC%97%B0%EC%82%B0%EB%8D%94%EC%83%B5" \
             "https://fin.land.naver.com/" \
             "https://fin.land.naver.com/front-api/v1/search/autocomplete/complexes?keyword=%EC%97%B0%EC%82%B0%EB%8D%94%EC%83%B5&size=5&page=0" \
+            "https://m.land.naver.com/complex/getComplexArticleList?hscpNo=1"https://www.naver.com/" ; dotradTpCd=A1&order=date_&showR0=N&page=1" \
             "https://www.naver.com/" ; do
             out=$(curl -sS -m 15 -A "$UA" -H "Referer: https://new.land.naver.com/" -o body.txt -w "%{http_code} %{time_total}s %{size_download}B" "$url" 2>&1) || true
             echo "== $url -> $out"
