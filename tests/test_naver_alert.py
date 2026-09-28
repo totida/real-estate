@@ -119,6 +119,19 @@ class ParseTest(unittest.TestCase):
         finally:
             na.http_get = orig
 
+    def test_pyeong_range(self):
+        # 서면아이파크2단지 실제 면적: 86.23/59.78㎡ → 26평, 75.24/52.6㎡ → 23평
+        self.assertTrue(na.matches_pyeong({"supply": 86.23, "exclusive": 59.78}, [25, 26]))
+        self.assertFalse(na.matches_pyeong({"supply": 75.24, "exclusive": 52.6}, [25, 26]))
+        title, _ = na.format_message([art(1, "7")], {"7": "A"}, [26, 25])
+        self.assertIn("25~26평 새 매물 1건", title)
+
+    def test_dong_suffix(self):
+        a = na.normalize_fin({"representativeArticleInfo": {"articleNumber": 1, "dongName": "201"}}, "9")
+        self.assertEqual(a["building"], "201동")
+        a = na.normalize_fin({"representativeArticleInfo": {"articleNumber": 1, "dongName": "A동"}}, "9")
+        self.assertEqual(a["building"], "A동")
+
     def test_format_message(self):
         cx = {"7": "서면아이파크2단지", "8": "연산더샵"}
         title, body = na.format_message([art(1, "7"), art(2, "8"), art(3, "7")], cx, [25])

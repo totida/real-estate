@@ -483,6 +483,7 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
     if realtor and count > 1:
         realtor = f"{realtor} 외 {count - 1}곳"
     trade = a.get("tradeType", "")
+    dong = str(a.get("dongName") or "")
     return {
         "articleNo": no,
         "aliases": aliases,
@@ -490,7 +491,7 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
         "name": a.get("complexName", ""),
         "trade": TRADE_NAMES.get(trade, trade),
         "price": fin_price(a.get("priceInfo") or {}),
-        "building": a.get("dongName", ""),
+        "building": dong + "동" if dong.isdigit() else dong,
         "floor": detail.get("floorInfo", ""),
         "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
         "supply": to_float(space.get("supplySpace")),
@@ -585,7 +586,11 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
 def format_message(new: list[dict], complexes: dict,
                    pyeongs: list[int] | None = None) -> tuple[str, str]:
-    size = f" {'/'.join(map(str, pyeongs))}평" if pyeongs else ""
+    ps = sorted(pyeongs or [])
+    if len(ps) > 1 and ps == list(range(ps[0], ps[-1] + 1)):
+        size = f" {ps[0]}~{ps[-1]}평"
+    else:
+        size = f" {'/'.join(map(str, ps))}평" if ps else ""
     names = list(dict.fromkeys(complexes.get(a["complexNo"], a["name"]) for a in new))
     where = names[0] + (f" 외 {len(names) - 1}곳" if len(names) > 1 else "")
     title = f"🏠{size} 새 매물 {len(new)}건 · {where} ({datetime.now(KST):%m/%d %H:%M})"
