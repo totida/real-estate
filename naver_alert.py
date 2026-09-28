@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """네이버 부동산 신규 매물 알림.
 
-config.json 에 지정한 단지들의 매물 목록을 네이버 부동산에서
+config.json 에 지정한 단지들의 매물 목록을 네이버 부동산(fin.land)에서
 조회하고, 이전 실행 때 없던 매물이 생기면 GitHub 이슈 / 텔레그램으로 알린다.
-표준 라이브러리만 사용한다.
+매물 조회에는 크로미움이 필요하고, 파이썬은 표준 라이브러리만 사용한다.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import shutil
+import socket
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -85,16 +90,281 @@ def http_json(url: str, headers: dict | None = None) -> dict:
     return data
 
 
+# ---------------------------------------------------------------- Browser (Chrome DevTools)
+#
+# fin.land 매물 API 는 Python/curl 로 직접 부르면 429(TOO_MANY_REQUESTS)로 막힌다.
+# 실제 크로미움을 화면 없이 띄워 fin.land 페이지 안에서 fetch() 를 실행하면 통과된다.
+# 추가 패키지 없이 쓰려고 DevTools 프로토콜(WebSocket)을 표준 라이브러리로 직접 다룬다.
+
+class BlockedError(RuntimeError):
+    """네이버가 429 로 막았다. 더 요청하면 차단이 길어지므로 즉시 멈춘다."""
+
+
+class BrowserError(RuntimeError):
+    """크로미움을 띄우거나 fin.land 페이지를 여는 데 실패했다 (다른 단지도 어차피 실패)."""
+
+
+class _WebSocket:
+    """DevTools 연결에 필요한 만큼만 구현한 WebSocket 클라이언트 (텍스트 프레임)."""
+
+    def __init__(self, url: str, timeout: float = 60) -> None:
+        u = urllib.parse.urlparse(url)
+        self.sock = socket.create_connection((u.hostname, u.port), timeout=timeout)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((
+            f"GET {u.path} HTTP/1.1\r\nHost: {u.hostname}:{u.port}\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        self.buf = bytearray()
+        while b"\r\n\r\n" not in self.buf:
+            self._fill()
+        head, _, rest = bytes(self.buf).partition(b"\r\n\r\n")
+        self.buf = bytearray(rest)
+        if b" 101 " not in head.split(b"\r\n", 1)[0]:
+            raise ConnectionError(f"WebSocket 연결 실패: {head[:200]!r}")
+
+    def _fill(self) -> None:
+        chunk = self.sock.recv(1 << 16)
+        if not chunk:
+            raise ConnectionError("WebSocket 연결이 끊겼습니다")
+        self.buf += chunk
+
+    def _read(self, n: int) -> bytes:
+        while len(self.buf) < n:
+            self._fill()
+        out = bytes(self.buf[:n])
+        del self.buf[:n]
+        return out
+
+    def send(self, text: str) -> None:
+        data = text.encode()
+        n = len(data)
+        head = bytearray([0x81])  # FIN + 텍스트
+        if n < 126:
+            head.append(0x80 | n)
+        elif n < 1 << 16:
+            head += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+        else:
+            head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+        mask = os.urandom(4)
+        body = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+        self.sock.sendall(bytes(head) + mask + body)
+
+    def recv(self) -> str:
+        parts = []
+        while True:
+            b0, b1 = self._read(2)
+            n = b1 & 0x7F
+            if n == 126:
+                n = int.from_bytes(self._read(2), "big")
+            elif n == 127:
+                n = int.from_bytes(self._read(8), "big")
+            if b1 & 0x80:
+                self._read(4)  # 서버 프레임은 마스킹하지 않지만 혹시 모를 경우 건너뜀
+            payload = self._read(n)
+            opcode = b0 & 0x0F
+            if opcode == 0x8:
+                raise ConnectionError("WebSocket 이 닫혔습니다")
+            if opcode in (0x9, 0xA):  # ping/pong
+                continue
+            parts.append(payload)
+            if b0 & 0x80:
+                return b"".join(parts).decode()
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def find_chromium() -> str:
+    """크로미움 실행 파일. 환경변수 CHROMIUM 으로 직접 지정할 수 있다."""
+    for cand in (os.getenv("CHROMIUM"), "chromium-browser", "chromium", "google-chrome",
+                 "google-chrome-stable", "/opt/pw-browsers/chromium"):
+        if cand and (shutil.which(cand) or Path(cand).is_file()):
+            return shutil.which(cand) or cand
+    raise RuntimeError("크로미움을 찾지 못했습니다. Termux 에서 "
+                       "'pkg install x11-repo && pkg install chromium' 으로 설치하세요.")
+
+
+def start_xvfb() -> tuple[subprocess.Popen, str]:
+    """가상 화면(Xvfb)을 띄우고 DISPLAY 값을 돌려준다."""
+    r, w = os.pipe()
+    proc = subprocess.Popen(["Xvfb", "-displayfd", str(w), "-screen", "0", "1280x800x24",
+                             "-nolisten", "tcp"], pass_fds=(w,),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(w)
+    with os.fdopen(r) as f:
+        num = f.readline().strip()
+    if not num:
+        proc.kill()
+        raise RuntimeError("Xvfb 실행 실패")
+    return proc, f":{num}"
+
+
+def open_browser() -> "Chromium":
+    """화면 없는 모드로 먼저 띄우고, 안 되면 가상 화면(Xvfb)에서 일반 모드로 띄운다.
+
+    환경변수 CHROMIUM_XVFB=1 이면 처음부터 Xvfb 를 쓴다.
+    """
+    exe = find_chromium()
+    if os.getenv("CHROMIUM_XVFB") != "1":
+        try:
+            return Chromium(exe)
+        except RuntimeError as e:
+            if not shutil.which("Xvfb"):
+                raise
+            print(f"  화면 없는 모드 실패, Xvfb 로 재시도: {str(e)[-300:]}", file=sys.stderr)
+    return Chromium(exe, xvfb=True)
+
+
+class Chromium:
+    """크로미움 한 개와 페이지 한 개를 DevTools 로 조종한다."""
+
+    def __init__(self, exe: str | None = None, xvfb: bool = False,
+                 start_timeout: float = 60) -> None:
+        self.profile = Path(tempfile.mkdtemp(prefix="naver-alert-chrome-"))
+        self.log = open(self.profile / "chrome.log", "wb")
+        self.xvfb: subprocess.Popen | None = None
+        self.proc: subprocess.Popen | None = None
+        self.ws: _WebSocket | None = None
+        self.session = ""
+        self._id = 0
+        try:
+            env = dict(os.environ)
+            mode = ["--headless=new"]
+            if xvfb:
+                self.xvfb, env["DISPLAY"] = start_xvfb()
+                mode = ["--window-size=1280,800"]
+            args = [exe or find_chromium(), *mode, "--no-sandbox", "--disable-gpu",
+                    "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+                    "--disable-blink-features=AutomationControlled", "--lang=ko-KR",
+                    "--remote-debugging-port=0", f"--user-data-dir={self.profile}",
+                    *os.getenv("CHROMIUM_FLAGS", "").split(), "about:blank"]
+            self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=self.log, env=env)
+            self._connect(start_timeout)
+        except Exception:
+            self.close()
+            raise
+
+    def _connect(self, timeout: float) -> None:
+        port_file = self.profile / "DevToolsActivePort"
+        deadline = time.monotonic() + timeout
+        while True:
+            lines = port_file.read_text().split() if port_file.exists() else []
+            if len(lines) >= 2:
+                break
+            if self.proc.poll() is not None or time.monotonic() > deadline:
+                self.log.flush()
+                tail = (self.profile / "chrome.log").read_bytes()[-600:].decode(errors="replace")
+                raise RuntimeError(f"크로미움 실행 실패:\n{tail}")
+            time.sleep(0.2)
+        self.ws = _WebSocket(f"ws://127.0.0.1:{lines[0]}{lines[1]}")
+        target = self.call("Target.createTarget", {"url": "about:blank"})["targetId"]
+        self.session = self.call("Target.attachToTarget",
+                                 {"targetId": target, "flatten": True})["sessionId"]
+        # 'HeadlessChrome' 표시를 지워 일반 크롬과 같게 보이게 한다.
+        ver = self.call("Browser.getVersion")
+        ua = ver["userAgent"].replace("HeadlessChrome", "Chrome")
+        full = ver["product"].split("/")[-1]
+        major = full.split(".")[0]
+        self.call("Emulation.setUserAgentOverride", {
+            "userAgent": ua, "acceptLanguage": "ko-KR,ko;q=0.9",
+            "userAgentMetadata": {
+                "brands": [{"brand": "Chromium", "version": major},
+                           {"brand": "Not_A Brand", "version": "24"}],
+                "fullVersion": full, "platform": "Linux", "platformVersion": "",
+                "architecture": "", "model": "", "mobile": False},
+        }, page=True)
+        self.call("Page.addScriptToEvaluateOnNewDocument", {
+            "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"},
+            page=True)
+
+    def call(self, method: str, params: dict | None = None, page: bool = False,
+             timeout: float = 60) -> dict:
+        self._id += 1
+        msg = {"id": self._id, "method": method, "params": params or {}}
+        if page:
+            msg["sessionId"] = self.session
+        self.ws.send(json.dumps(msg))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            reply = json.loads(self.ws.recv())
+            if reply.get("id") == self._id:
+                if "error" in reply:
+                    raise RuntimeError(f"{method}: {reply['error'].get('message')}")
+                return reply.get("result", {})
+        raise TimeoutError(method)
+
+    def goto(self, url: str, timeout: float = 45) -> None:
+        res = self.call("Page.navigate", {"url": url}, page=True)
+        if res.get("errorText"):
+            raise RuntimeError(f"{url} 열기 실패: {res['errorText']}")
+        deadline = time.monotonic() + timeout
+        loaded = 'document.readyState === "complete" && location.href !== "about:blank"'
+        while not self.evaluate(loaded):
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"{url} 로딩 시간 초과")
+            time.sleep(0.5)
+
+    def evaluate(self, expression: str):
+        res = self.call("Runtime.evaluate", {"expression": expression, "awaitPromise": True,
+                                             "returnByValue": True}, page=True)
+        if "exceptionDetails" in res:
+            d = res["exceptionDetails"]
+            raise RuntimeError((d.get("exception") or {}).get("description") or d.get("text"))
+        return (res.get("result") or {}).get("value")
+
+    def fetch_json(self, url: str, payload: dict) -> tuple[int, str]:
+        """페이지 안에서 POST fetch 를 실행해 (상태코드, 본문) 을 돌려준다."""
+        body = json.dumps(json.dumps(payload, ensure_ascii=False), ensure_ascii=False)
+        js = f"""(async () => {{
+            const r = await fetch({json.dumps(url)}, {{
+                method: "POST", credentials: "include", body: {body},
+                headers: {{"content-type": "application/json",
+                          "accept": "application/json, text/plain, */*"}}}});
+            return {{status: r.status, text: await r.text()}};
+        }})()"""
+        out = self.evaluate(js)
+        return out["status"], out["text"]
+
+    def close(self) -> None:
+        if self.ws:
+            try:
+                self.call("Browser.close", timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+            self.ws.close()
+        for proc in (self.proc, self.xvfb):
+            if proc is None:
+                continue
+            if proc is self.xvfb or self.ws is None:
+                proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        self.log.close()
+        shutil.rmtree(self.profile, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- Naver
 
 class NaverLand:
-    """매물은 m.land.naver.com API(제한이 느슨함)로 먼저 조회하고, 실패하면 new.land 로 대체."""
+    """매물은 fin.land.naver.com API 를 크로미움 안에서 호출해 조회한다."""
 
     NEW = "https://new.land.naver.com"
-    MOBILE = "https://m.land.naver.com"
+    FIN = "https://fin.land.naver.com"
+    # 단지 페이지(/complexes/…)는 다른 오리진에서 그려져 fetch 가 CORS 로 막히므로 지도 페이지를 연다.
+    START_PAGE = "/map"
+    ARTICLE_API = "/front-api/v1/complex/article/list"
 
-    def __init__(self) -> None:
+    def __init__(self, fin: str | None = None) -> None:
+        self.fin = fin or self.FIN
         self._token: str | None = None
+        self._browser: Chromium | None = None
 
     def _new_headers(self) -> dict:
         h = {"Referer": f"{self.NEW}/complexes", "Accept": "application/json"}
@@ -118,101 +388,112 @@ class NaverLand:
             for c in data.get("complexes", [])
         ]
 
+    def _page(self) -> Chromium:
+        if self._browser is None:
+            try:
+                browser = open_browser()
+            except Exception as e:
+                raise BrowserError(str(e)) from e
+            try:
+                browser.goto(self.fin + self.START_PAGE)
+                time.sleep(2)  # 페이지 스크립트가 쿠키 등을 준비할 시간
+                origin = browser.evaluate("location.origin")
+                if origin != self.fin:
+                    raise RuntimeError(f"지도 페이지가 다른 주소로 이동했습니다: {origin}")
+            except Exception as e:
+                browser.close()
+                raise BrowserError(f"fin.land 페이지 열기 실패: {e}") from e
+            self._browser = browser
+        return self._browser
+
     def articles(self, complex_no: str, trade_types: list[str]) -> list[dict]:
-        try:
-            return self._articles_mobile(complex_no, trade_types)
-        except Exception as e:  # noqa: BLE001
-            print(f"  m.land 조회 실패({e}), new.land 로 재시도", file=sys.stderr)
-            return self._articles_new(complex_no, trade_types)
-
-    def _articles_new(self, complex_no: str, trade_types: list[str]) -> list[dict]:
+        page = self._page()
         out: list[dict] = []
-        for page in range(1, 51):
-            params = {
-                "realEstateType": "APT:ABYG:JGC:PRE",
-                "tradeType": ":".join(trade_types),
-                "priceType": "RETAIL",
-                "sameAddressGroup": "false",
-                "showArticle": "false",
-                "order": "dateDesc",
-                "type": "list",
-                "complexNo": complex_no,
-                "page": page,
+        last_info: list = []
+        seed = f"alert-{int(time.time())}"
+        for _ in range(50):
+            payload = {
+                "size": 30, "complexNumber": complex_no, "tradeTypes": trade_types,
+                "pyeongTypes": [], "dongNumbers": [], "userChannelType": "PC",
+                "articleSortType": "RANKING_DESC", "seed": seed, "lastInfo": last_info,
             }
-            url = (f"{self.NEW}/api/articles/complex/{complex_no}?"
-                   + urllib.parse.urlencode(params))
-            data = http_json(url, self._new_headers())
-            out += [normalize_new(a, complex_no) for a in data.get("articleList", [])]
-            if not data.get("isMoreData"):
+            status, text = page.fetch_json(self.fin + self.ARTICLE_API, payload)
+            if status == 429:
+                raise BlockedError(f"네이버가 요청을 막았습니다(429): {text[:200]}")
+            if status != 200:
+                raise RuntimeError(f"매물 API 응답 {status}: {text[:200]}")
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            # 실패 응답을 '매물 0건' 으로 저장하면 다음 조회 때 모든 매물이 새 매물로 알림되므로 오류로 처리
+            if (not isinstance(data, dict) or data.get("isSuccess") is False
+                    or not isinstance(data.get("result"), dict)):
+                raise RuntimeError(f"매물 API 예상 밖 응답: {text[:200]}")
+            result = data["result"]
+            out += [normalize_fin(item, complex_no) for item in result.get("list") or []]
+            if not result.get("hasNextPage"):
                 break
-            time.sleep(1)
+            last_info = result.get("lastInfo") or []
+            time.sleep(1.5)
         return out
 
-    def _articles_mobile(self, complex_no: str, trade_types: list[str]) -> list[dict]:
-        out: list[dict] = []
-        for i, trade in enumerate(trade_types):  # 거래유형을 합쳐 보내면 빈 응답이 올 수 있어 하나씩 조회
-            if i:
-                time.sleep(1.5)
-            for page in range(1, 51):
-                params = {
-                    "hscpNo": complex_no,
-                    "tradTpCd": trade,
-                    "order": "prc_",
-                    "showR0": "N",
-                    "page": page,
-                }
-                url = f"{self.MOBILE}/complex/getComplexArticleList?" + urllib.parse.urlencode(params)
-                data = http_json(url, {"Referer": f"{self.MOBILE}/"})
-                result = data.get("result") or {}
-                items = result.get("list") or []
-                out += [normalize_mobile(a, complex_no) for a in items]
-                if not items or result.get("moreDataYn") != "Y":
-                    break
-                time.sleep(1.5)
-        return out
+    def close(self) -> None:
+        if self._browser:
+            self._browser.close()
+            self._browser = None
 
 
-def normalize_new(a: dict, complex_no: str) -> dict:
-    price = a.get("dealOrWarrantPrc", "")
-    if a.get("rentPrc"):
-        price = f"{price}/{a['rentPrc']}"
+def won_text(v) -> str:
+    """원 단위 금액을 '8억 5,000만' 처럼 표기한다."""
+    try:
+        won = int(float(str(v).replace(",", "")))
+    except (TypeError, ValueError):
+        return str(v or "")
+    eok, man = divmod(won // 10_000, 10_000)
+    if eok and man:
+        return f"{eok}억 {man:,}만"
+    return f"{eok}억" if eok else f"{man:,}만"
+
+
+def fin_price(p: dict) -> str:
+    main = p.get("dealPrice") or p.get("warrantyPrice") or p.get("depositPrice")
+    txt = won_text(main) if main else ""
+    if p.get("rentPrice"):
+        txt = f"{txt}/{won_text(p['rentPrice'])}"
+    return txt or "가격 정보 없음"
+
+
+def normalize_fin(item: dict, complex_no: str) -> dict:
+    """fin.land 매물 목록 항목. 같은 집을 여러 중개사가 올리면 대표 매물 하나로 묶여 온다."""
+    a = item.get("representativeArticleInfo") or item
+    dup = item.get("duplicatedArticleInfo") or {}
+    detail = a.get("articleDetail") or {}
+    space = a.get("spaceInfo") or {}
+    no = str(a["articleNumber"])
+    aliases = sorted({str(x["articleNumber"]) for x in dup.get("articleInfoList") or []
+                      if x.get("articleNumber")} - {no})
+    realtor = (a.get("brokerInfo") or {}).get("brokerageName", "")
+    count = dup.get("realtorCount") or 1
+    if realtor and count > 1:
+        realtor = f"{realtor} 외 {count - 1}곳"
+    trade = a.get("tradeType", "")
     return {
-        "articleNo": str(a["articleNo"]),
+        "articleNo": no,
+        "aliases": aliases,
         "complexNo": complex_no,
-        "name": a.get("articleName", ""),
-        "trade": a.get("tradeTypeName", ""),
-        "price": price,
-        "building": a.get("buildingName", ""),
-        "floor": a.get("floorInfo", ""),
-        "area": f"{a.get('area1', '')}/{a.get('area2', '')}㎡",
-        "supply": to_float(a.get("area1")),
-        "exclusive": to_float(a.get("area2")),
-        "direction": a.get("direction", ""),
-        "desc": a.get("articleFeatureDesc", ""),
-        "realtor": a.get("realtorName", ""),
-        "confirmed": a.get("articleConfirmYmd", ""),
-    }
-
-
-def normalize_mobile(a: dict, complex_no: str) -> dict:
-    price = a.get("prcInfo") or a.get("hanPrc") or str(a.get("prc", ""))
-    if a.get("rentPrc") and "/" not in price:
-        price = f"{price}/{a['rentPrc']}"
-    return {
-        "articleNo": str(a["atclNo"]),
-        "complexNo": complex_no,
-        "name": a.get("atclNm", ""),
-        "trade": a.get("tradTpNm", ""),
-        "price": price,
-        "building": a.get("bildNm", ""),
-        "floor": a.get("flrInfo", ""),
-        "area": f"{a.get('spc1', '')}/{a.get('spc2', '')}㎡",
-        "supply": to_float(a.get("spc1")),
-        "exclusive": to_float(a.get("spc2")),
-        "direction": a.get("direction", ""),
-        "desc": a.get("atclFetrDesc", ""),
-        "realtor": a.get("rltrNm", ""),
-        "confirmed": a.get("atclCfmYmd") or a.get("cfmYmd", ""),
+        "name": a.get("complexName", ""),
+        "trade": TRADE_NAMES.get(trade, trade),
+        "price": fin_price(a.get("priceInfo") or {}),
+        "building": a.get("dongName", ""),
+        "floor": detail.get("floorInfo", ""),
+        "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
+        "supply": to_float(space.get("supplySpace")),
+        "exclusive": to_float(space.get("exclusiveSpace")),
+        "direction": detail.get("direction", ""),
+        "desc": detail.get("articleFeatureDescription") or "",
+        "realtor": realtor,
+        "confirmed": (a.get("verificationInfo") or {}).get("articleConfirmDate", ""),
     }
 
 
@@ -249,7 +530,7 @@ def matches_pyeong(a: dict, pyeongs: list[int]) -> bool:
 
 
 def article_url(a: dict) -> str:
-    return f"https://new.land.naver.com/complexes/{a['complexNo']}?articleNo={a['articleNo']}"
+    return f"https://fin.land.naver.com/articles/{a['articleNo']}"
 
 
 def matches_keyword(name: str, keyword: str) -> bool:
@@ -278,14 +559,17 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
     한동안 목록에서 안 보인 매물은 prune_days 가 지나면 잊는다
     (일시적인 조회 누락 때문에 같은 매물이 다시 알림되지 않도록 여유를 둔다).
+    같은 집을 여러 중개사가 올린 매물(aliases)은 대표 매물이 바뀌어도 새 매물로 보지 않는다.
     """
     seen: dict = state.setdefault("seen", {})
     today = now.strftime("%Y-%m-%d")
     new = []
     for a in articles:
-        if a["articleNo"] not in seen:
+        ids = [a["articleNo"], *a.get("aliases", [])]
+        if not any(i in seen for i in ids):
             new.append(a)
-        seen[a["articleNo"]] = today
+        for i in ids:
+            seen[i] = today
     cutoff = (now - timedelta(days=prune_days)).strftime("%Y-%m-%d")
     for no in [k for k, d in seen.items() if d < cutoff]:
         del seen[no]
@@ -402,27 +686,35 @@ def main() -> int:
     now = datetime.now(KST)
     new: list[dict] = []
     ok = 0
-    for i, (no, name) in enumerate(complexes.items()):
-        if i:
-            time.sleep(3)  # 단지 사이 간격 (429 방지)
-        try:
-            items = naver.articles(no, trade_types)
-        except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
-            print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
-            continue
-        ok += 1
-        fresh = diff_and_update(state, items, now)
-        if no in initialized:
-            matched = [a for a in fresh if matches_pyeong(a, pyeongs)]
-            print(f"{name} ({no}): 매물 {len(items)}건, 새 매물 {len(fresh)}건 (조건 일치 {len(matched)}건)")
-            new += matched
-        else:
-            # 처음 보는 단지: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
-            initialized.add(no)
-            print(f"{name} ({no}): 매물 {len(items)}건 기준 저장 (첫 조회, 알림 없음)")
+    try:
+        for i, (no, name) in enumerate(complexes.items()):
+            if i:
+                time.sleep(3)  # 단지 사이 간격 (429 방지)
+            try:
+                items = naver.articles(no, trade_types)
+            except (BlockedError, BrowserError) as e:
+                print(f"경고: {name} ({no}) 조회 실패, 나머지 단지도 건너뜁니다: {e}", file=sys.stderr)
+                break
+            except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
+                print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
+                continue
+            ok += 1
+            fresh = diff_and_update(state, items, now)
+            if no in initialized:
+                matched = [a for a in fresh if matches_pyeong(a, pyeongs)]
+                print(f"{name} ({no}): 매물 {len(items)}건, 새 매물 {len(fresh)}건 (조건 일치 {len(matched)}건)")
+                new += matched
+            else:
+                # 처음 보는 단지: 현재 매물은 기준으로만 저장하고 알림은 보내지 않는다.
+                initialized.add(no)
+                print(f"{name} ({no}): 매물 {len(items)}건 기준 저장 (첫 조회, 알림 없음)")
+    finally:
+        naver.close()
     state["initialized_complexes"] = sorted(initialized)
 
-    if new:
+    if not ok:
+        print("매물을 조회한 단지가 없습니다.")
+    elif new:
         title, body = format_message(new, complexes, pyeongs)
         print(title + "\n" + body)
         sent = [n for n, f in (("telegram", notify_telegram), ("github", notify_github))
