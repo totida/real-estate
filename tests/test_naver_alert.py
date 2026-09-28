@@ -526,6 +526,19 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("이전 변동 2건 ▾</summary>10/02 오전 8시 7억 8,000만 → 7억 6,000만", body)
         self.assertLess(body.index("10/03 오후 1시 7억 6,000만"), body.index("<details"))
 
+    def test_date_only(self):
+        na.SHOW_TIME = False
+        try:
+            r = {"no": "7", "name": "A", "status": "ok", "listings": [], "new": [], "changes": [], "gone": []}
+            subject, text, _ = na.format_briefing([r], "25~26평", datetime(2026, 10, 3, 10, tzinfo=na.KST),
+                                                  datetime(2026, 10, 2, 10, tzinfo=na.KST))
+            self.assertTrue(subject.startswith("[매물 브리핑] 10/03 25~26평"))
+            self.assertIn("이번 변동: 10/02 ~ 10/03 사이", text)
+            self.assertNotIn("오전", text)
+            self.assertEqual(na.stamp_label("2026-10-03T10:00+09:00"), "10/03")
+        finally:
+            na.SHOW_TIME = True
+
     def test_html_escaped(self):
         r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}
         _, _, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))

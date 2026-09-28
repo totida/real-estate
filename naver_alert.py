@@ -866,8 +866,14 @@ def sale_rows(r: dict) -> list[dict]:
     return sorted(rows, key=lambda a: a.get("price_won") or 0)
 
 
+# 하루 한 번만 조회하면 시각은 의미가 없어 날짜만 쓴다 (config.json 의 show_time)
+SHOW_TIME = True
+
+
 def time_label(dt: datetime, with_date: bool = True) -> str:
-    """'10/03 오후 1시' (with_date=False 면 '오후 1시')."""
+    """'10/03 오후 1시' (with_date=False 면 '오후 1시'). SHOW_TIME 이 꺼져 있으면 '10/03'."""
+    if not SHOW_TIME:
+        return f"{dt:%m/%d}"
     t = f"{'오전' if dt.hour < 12 else '오후'} {dt.hour % 12 or 12}시"
     return f"{dt:%m/%d} {t}" if with_date else t
 
@@ -951,7 +957,9 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     ok = [r for r in reports if r["status"] != "failed"]
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
     day = time_label(now)  # 하루 여러 번 받아도 구분되게
-    if since:
+    if since and not SHOW_TIME:
+        window = f"{since:%m/%d} ~ {now:%m/%d}"
+    elif since:
         same_day = since.date() == now.date()
         window = f"{time_label(since, with_date=not same_day)} ~ {time_label(now, with_date=False)}"
     else:
@@ -1055,10 +1063,11 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             h.append('<div style="color:#5f6368;margin-top:6px">이번 변동 없음</div>')
         week = r.get("week") or []
         if week:
-            text.append(f"  [최근 7일 변동 {len(week)}건, 최신순 · 시각은 변동을 확인한 브리핑]")
+            note = ("날짜는 변동을 확인한 날, 그 전날 조회 이후 생긴 변동" if not SHOW_TIME else
+                    "시각은 변동을 확인한 브리핑, 그 전 브리핑 이후 생긴 변동")
+            text.append(f"  [최근 7일 변동 {len(week)}건, 최신순 · {note}]")
             h.append(f'<div style="font-weight:600;margin:10px 0 2px">🗓 최근 7일 변동 {len(week)}건 '
-                     '<span style="font-weight:400;color:#5f6368">(최신순 · 시각은 변동을 확인한 브리핑, '
-                     '그 전 브리핑 이후 생긴 변동)</span></div>'
+                     f'<span style="font-weight:400;color:#5f6368">(최신순 · {note})</span></div>'
                      '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:13px;'
                      'width:100%">')
             colors = {"new": "#188038", "change": "#b06000", "gone": "#5f6368"}
@@ -1294,6 +1303,8 @@ def main() -> int:
 
     since = parse_time(state.get("last_run"))
     log_events(state, reports, now, since)
+    global SHOW_TIME
+    SHOW_TIME = bool(config.get("show_time", True))
     mail_hours = [int(x) for x in config.get("mail_hours") or []]
     if mail_configured() and mail_hours and now.hour not in mail_hours:
         print(f"메일 전송 생략: 브리핑 시간({', '.join(map(str, mail_hours))}시)이 아님")
