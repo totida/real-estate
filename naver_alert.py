@@ -184,8 +184,13 @@ def find_chromium() -> str:
                  "google-chrome-stable", "/opt/pw-browsers/chromium"):
         if cand and (shutil.which(cand) or Path(cand).is_file()):
             return shutil.which(cand) or cand
+    # 패키지마다 이름이 달라 PATH 에서 'chrom' 이 들어간 실행 파일을 찾아본다
+    for d in os.getenv("PATH", "").split(os.pathsep):
+        for f in sorted(Path(d).glob("*chrom*")) if d and Path(d).is_dir() else []:
+            if "driver" not in f.name and f.is_file() and os.access(f, os.X_OK):
+                return str(f)
     raise RuntimeError("크로미움을 찾지 못했습니다. Termux 에서 "
-                       "'pkg install x11-repo && pkg install chromium' 으로 설치하세요.")
+                       "'pkg install tur-repo x11-repo && pkg install chromium' 으로 설치하세요.")
 
 
 def start_xvfb() -> tuple[subprocess.Popen, str]:
