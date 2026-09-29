@@ -422,6 +422,8 @@ class MainTest(unittest.TestCase):
         self.assertIn("신규 1 · 가격변동 1", msgs[0]["Subject"])  # 9시 신규도 10시 메일에
         body = msgs[0].get_body(("html",)).get_content()
         self.assertIn("10/03 오전 9시 확인", body)
+        att = [p for p in msgs[0].iter_attachments()]
+        self.assertEqual(att[0].get_filename(), "매매매물_20261003.csv")
         self.assertTrue(all(e.get("mailed") for e in na.load_state()["events"]))
 
     def test_trade_type_removed_not_gone(self):
@@ -554,6 +556,29 @@ class BriefingTest(unittest.TestCase):
             self.assertEqual(na.stamp_label("2026-10-03T10:00+09:00"), "10/03")
         finally:
             na.SHOW_TIME = True
+
+    def test_sort_listings(self):
+        rows = [dict(art(1), building="102동", floor="5/25", price_won=500),
+                dict(art(2), building="101동", floor="고/25", price_won=500),
+                dict(art(3), building="101동", floor="3/25", price_won=500),
+                dict(art(4), building="101동", floor="1/25", price_won=400)]
+        ids = lambda rs: [a["articleNo"] for a in rs]  # noqa: E731
+        self.assertEqual(ids(na.sort_listings(rows, ["price", "dong", "-floor"])), ["4", "2", "3", "1"])
+        self.assertEqual(ids(na.sort_listings(rows, ["dong", "floor"])), ["4", "3", "2", "1"])
+        self.assertEqual(na.sort_label(["price", "dong", "-floor"]), "가격↑ → 동↑ → 층↓")
+        self.assertEqual(na.floor_num({"floor": "고/25"}), 20)
+        self.assertEqual(na.floor_num({"floor": "12/25"}), 12)
+
+    def test_listings_csv(self):
+        a = dict(art(1), price_won=620_000_000, price="6억 2,000만", first_price_won=630_000_000,
+                 first_price="6억 3,000만", first_seen="2026-09-29")
+        data = na.listings_csv([{"name": "서면아이파크2단지", "listings": [a]}])
+        self.assertTrue(data.startswith("\ufeff".encode()))
+        import csv as _csv
+        rows = list(_csv.DictReader(data.decode("utf-8-sig").splitlines()))
+        self.assertEqual(rows[0]["가격(만원)"], "62000")
+        self.assertEqual(rows[0]["처음대비(만원)"], "-1000")
+        self.assertEqual(rows[0]["링크"], "https://fin.land.naver.com/articles/1")
 
     def test_html_escaped(self):
         r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}

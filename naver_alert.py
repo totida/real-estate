@@ -860,10 +860,78 @@ def trade_summary(listings: list[dict]) -> str:
     return text
 
 
+# 현재 매매 표 정렬 순서 (config.json 의 sort). 앞이 우선, '-' 는 내림차순.
+SORT_ORDER = ["price", "dong", "-floor"]
+SORT_NAMES = {"price": "가격", "dong": "동", "floor": "층", "pyeong": "평", "registered": "등록일"}
+
+
+def dong_num(a: dict) -> float:
+    m = re.search(r"\d+", a.get("building") or "")
+    return int(m.group()) if m else float("inf")
+
+
+def floor_num(a: dict) -> float:
+    """층을 숫자로. 저/중/고층은 총 층수의 20/50/80% 위치로 본다."""
+    cur, _, total = str(a.get("floor") or "").partition("/")
+    if cur.isdigit():
+        return int(cur)
+    try:
+        return int(total) * {"저": 0.2, "중": 0.5, "고": 0.8}[cur]
+    except (KeyError, ValueError):
+        return -1
+
+
+SORT_KEYS = {
+    "price": lambda a: a.get("price_won") or 0,
+    "dong": dong_num,
+    "floor": floor_num,
+    "pyeong": lambda a: pyeong_of(a) or 0,
+    "registered": lambda a: a.get("first_seen") or "",
+}
+
+
+def sort_listings(rows: list[dict], order: list[str] | None = None) -> list[dict]:
+    """order 순서대로(앞이 우선) 정렬. 우선순위가 낮은 키부터 안정 정렬을 반복한다."""
+    rows = list(rows)
+    for key in reversed(order or SORT_ORDER):
+        name = key.lstrip("-")
+        if name in SORT_KEYS:
+            rows.sort(key=SORT_KEYS[name], reverse=key.startswith("-"))
+    return rows
+
+
+def sort_label(order: list[str] | None = None) -> str:
+    return " → ".join(f"{SORT_NAMES.get(k.lstrip('-'), k)}{'↓' if k.startswith('-') else '↑'}"
+                      for k in (order or SORT_ORDER) if k.lstrip("-") in SORT_KEYS)
+
+
 def sale_rows(r: dict) -> list[dict]:
-    """현재 매매 매물을 가격순으로. 처음 본 가격 대비 변동을 붙인다."""
-    rows = [a for a in r.get("listings", []) if a["trade"] == "매매"]
-    return sorted(rows, key=lambda a: a.get("price_won") or 0)
+    """현재 매매 매물을 설정한 정렬 순서로."""
+    return sort_listings([a for a in r.get("listings", []) if a["trade"] == "매매"])
+
+
+LISTING_CSV_FIELDS = ["단지", "가격(만원)", "가격", "동", "층", "층(정렬용)", "평", "공급㎡", "전용㎡",
+                      "처음가격", "처음대비(만원)", "처음본날", "최근변동", "중개사", "특징", "링크"]
+
+
+def listings_csv(reports: list[dict]) -> bytes:
+    """모든 단지의 현재 매매 매물 표 (엑셀·구글 시트에서 원하는 열로 정렬해 보기용)."""
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(LISTING_CSV_FIELDS)
+    for r in reports:
+        for a in sale_rows(r):
+            first = a.get("first_price_won")
+            diff = (a["price_won"] - first) // 10_000 if first and a.get("price_won") else ""
+            hist = recent_price_changes(a, 1)
+            w.writerow([r["name"], (a.get("price_won") or 0) // 10_000 or "", a.get("price", ""),
+                        a.get("building", ""), a.get("floor", ""), round(floor_num(a), 1),
+                        pyeong_of(a) or "", a.get("supply") or "", a.get("exclusive") or "",
+                        a.get("first_price", ""), diff, a.get("first_seen", ""),
+                        hist[0] if hist else "", a.get("realtor", ""), a.get("desc", ""),
+                        article_url(a)])
+    return buf.getvalue().encode("utf-8-sig")  # 엑셀에서 한글이 깨지지 않게 BOM
 
 
 # 하루 한 번만 조회하면 시각은 의미가 없어 날짜만 쓴다 (config.json 의 show_time)
@@ -1092,10 +1160,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             h.append("</table>")
         rows = sale_rows(r)
         if rows:
-            text.append(f"  [현재 매매 {len(rows)}건, 가격순 · 변동은 처음 본 가격 대비]")
+            text.append(f"  [현재 매매 {len(rows)}건, 정렬 {sort_label()} · 변동은 처음 본 가격 대비]")
             h.append(f'<div style="font-weight:600;margin:10px 0 2px">현재 매매 {len(rows)}건 '
-                     '<span style="font-weight:400;color:#5f6368">(가격순 · 변동은 처음 본 가격 대비, '
-                     '등록은 처음 본 날)</span></div>'
+                     f'<span style="font-weight:400;color:#5f6368">(정렬 {esc(sort_label())} · '
+                     '변동은 처음 본 가격 대비, 등록은 처음 본 날)</span></div>'
                      '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:13px;'
                      'width:100%">'
                      '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">가격</th>'
@@ -1131,6 +1199,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                              + cell + "</td></tr>")
             h.append("</table>")
         text.append("")
+    h.append('<p style="color:#5f6368;font-size:13px;margin-top:20px">📎 첨부한 엑셀(CSV) 파일을 열면 '
+             '전체 매매 매물을 동·층·가격 등 원하는 열로 정렬해 볼 수 있습니다.</p>')
     h.append('<p style="color:#9aa0a6;font-size:12px;margin-top:24px">사라짐은 두 번 연속 조회에서 목록에 없던 매물입니다. '
              '거래 완료인지 중개사가 내린 것인지는 구분할 수 없습니다.</p></div>')
     return subject, "\n".join(text), "".join(h)
@@ -1140,7 +1210,8 @@ def mail_configured() -> bool:
     return bool(setting("SMTP_USER") and setting("SMTP_PASSWORD"))
 
 
-def send_mail(subject: str, text: str, html_body: str | None = None) -> str:
+def send_mail(subject: str, text: str, html_body: str | None = None,
+              attachments: list[tuple[str, bytes, str]] | None = None) -> str:
     """Gmail 등 SMTP 로 메일을 보내고 받는 주소를 돌려준다.
 
     local.json(또는 환경변수)의 SMTP_USER, SMTP_PASSWORD(Gmail 앱 비밀번호),
@@ -1154,6 +1225,9 @@ def send_mail(subject: str, text: str, html_body: str | None = None) -> str:
     msg.set_content(text)
     if html_body:
         msg.add_alternative(html_body, subtype="html")
+    for name, data, mime in attachments or []:
+        maintype, _, subtype = mime.partition("/")
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
     with smtplib.SMTP_SSL(setting("SMTP_HOST", "smtp.gmail.com"),
                           int(setting("SMTP_PORT", "465")), timeout=30) as smtp:
         smtp.login(user, password)
@@ -1306,8 +1380,9 @@ def main() -> int:
 
     since = parse_time(state.get("last_run"))
     log_events(state, reports, now, since)
-    global SHOW_TIME
+    global SHOW_TIME, SORT_ORDER
     SHOW_TIME = bool(config.get("show_time", True))
+    SORT_ORDER = list(config.get("sort") or ["price", "dong", "-floor"])
     mail_hours = [int(x) for x in config.get("mail_hours") or []]
     if mail_configured() and mail_hours and now.hour not in mail_hours:
         print(f"메일 전송 생략: 브리핑 시간({', '.join(map(str, mail_hours))}시)이 아님")
@@ -1327,7 +1402,9 @@ def main() -> int:
         subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
                                                    last_mail or since)
         try:
-            print(f"메일 전송 완료: {send_mail(subject, text, html_body)}")
+            csv_name = f"매매매물_{now:%Y%m%d}.csv"
+            to = send_mail(subject, text, html_body, [(csv_name, listings_csv(briefing), "text/csv")])
+            print(f"메일 전송 완료: {to}")
             state["last_mail"] = now.isoformat(timespec="minutes")
             shown = {r["no"] for r in briefing if r["status"] != "failed"}  # 실패 단지는 다음 메일에
             for e in state.get("events") or []:

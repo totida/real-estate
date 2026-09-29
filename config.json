@@ -13,5 +13,6 @@
   "trade_types": ["A1"],
   "pyeong": [25, 26],
   "mail_hours": [10],
-  "show_time": false
+  "show_time": false,
+  "sort": ["price", "dong", "-floor"]
 }
