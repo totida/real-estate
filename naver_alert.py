@@ -1243,6 +1243,12 @@ def main() -> int:
     wanted = lambda a: matches_pyeong(a, pyeongs)  # noqa: E731
     ok = 0
     abort = ""
+    # 감시 대상에서 빠진 단지·거래유형(예: 매매만 보기로 바꾼 뒤의 전세·월세)의 기록은 정리한다
+    trades = {TRADE_NAMES.get(t, t) for t in trade_types}
+    state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
+                        if t["complexNo"] in complexes and t.get("trade") in trades}
+    state["events"] = [e for e in state.get("events") or []
+                       if e["item"].get("trade", "매매") in trades]
     try:
         for i, (no, name) in enumerate(complexes.items()):
             if i:
@@ -1279,9 +1285,6 @@ def main() -> int:
     finally:
         naver.close()
     state["initialized_complexes"] = sorted(initialized)
-    # 감시 대상에서 빠진 단지의 추적 기록은 정리한다
-    state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
-                        if t["complexNo"] in complexes}
 
     if not ok:
         print("매물을 조회한 단지가 없습니다.")

@@ -424,6 +424,22 @@ class MainTest(unittest.TestCase):
         self.assertIn("10/03 오전 9시 확인", body)
         self.assertTrue(all(e.get("mailed") for e in na.load_state()["events"]))
 
+    def test_trade_type_removed_not_gone(self):
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "A"}, "pyeong": [25],
+                                        "trade_types": ["A1", "B2"]}, ensure_ascii=False))
+        fake = FakeNaver({"1": [art(1), dict(art(2), trade="월세")]})
+        self.run_main(fake)
+        self.assertEqual(sorted(na.load_state()["tracked"]), ["1", "2"])
+        # 매매만 보기로 바꾸면 월세 매물은 목록에 없어도 '사라짐' 이 아니라 기록에서 정리
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "A"}, "pyeong": [25],
+                                        "trade_types": ["A1"]}, ensure_ascii=False))
+        fake.listings["1"] = [art(1)]
+        self.run_main(fake)
+        self.run_main(fake)
+        self.assertEqual(sorted(na.load_state()["tracked"]), ["1"])
+        self.assertFalse(self.sent)
+        self.assertFalse((self.tmp / "history.csv").exists())
+
     def test_gone_history(self):
         import contextlib
         import io

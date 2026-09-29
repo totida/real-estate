@@ -10,7 +10,7 @@
     "131691": "양정포레힐즈 스위첸",
     "112331": "연산더샵"
   },
-  "trade_types": ["A1", "B1", "B2"],
+  "trade_types": ["A1"],
   "pyeong": [25, 26],
   "mail_hours": [10],
   "show_time": false
