@@ -510,6 +510,21 @@ class MainTest(unittest.TestCase):
         self.assertFalse(self.sent)
         self.assertFalse((self.tmp / "history.csv").exists())
 
+    def test_status_broker_check(self):
+        import contextlib
+        import io
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "A"}, "pyeong": [25]},
+                                       ensure_ascii=False))
+        g = dict(art(1), aliases=["2"], realtor_count=2, price_won=800_000_000,
+                 member_prices={"1": 800_000_000, "2": 790_000_000},
+                 member_brokers={"1": "OO공인", "2": "XX부동산"})
+        self.run_main(FakeNaver({"1": [g]}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            na.print_status()
+        self.assertIn("여러 중개사 매물 1건 중 중개사별 호가가 들어온 매물 1건", out.getvalue())
+        self.assertIn("XX부동산 7억 9,000만 / OO공인 8억", out.getvalue())
+
     def test_gone_history(self):
         import contextlib
         import io

@@ -820,6 +820,16 @@ def print_status() -> int:
     print(f"마지막 조회: {state.get('last_run', '-')} · 마지막 메일: {state.get('last_mail', '-')}")
     tracked = state.get("tracked") or {}
     now = datetime.now(KST)
+    # 대표가 아닌 중개사들의 호가가 네이버 응답에 들어오는지 확인
+    multi = [t for t in tracked.values() if (t.get("realtor_count") or 0) > 1]
+    priced = [t for t in multi if len(t.get("member_prices") or {}) > 1]
+    print(f"여러 중개사 매물 {len(multi)}건 중 중개사별 호가가 들어온 매물 {len(priced)}건"
+          + (" → 대표 외 중개사 호가도 받고 있음" if priced else
+             " → 대표 중개사 호가만 받고 있음" if multi else ""))
+    for t in priced[:3]:
+        brokers = t.get("member_brokers") or {}
+        print("  예: " + " / ".join(f"{brokers.get(no, no)} {won_text(w)}"
+                                    for no, w in sorted(t["member_prices"].items(), key=lambda x: x[1])))
     for no, name in (config.get("complexes") or {}).items():
         ts = [t for t in tracked.values() if t["complexNo"] == str(no)]
         moved = sum(1 for t in ts if len(t.get("price_history") or []) > 1)
