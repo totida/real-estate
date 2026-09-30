@@ -525,6 +525,25 @@ class MainTest(unittest.TestCase):
         self.assertIn("여러 중개사 매물 1건 중 중개사별 호가가 들어온 매물 1건", out.getvalue())
         self.assertIn("XX부동산 7억 9,000만 / OO공인 8억", out.getvalue())
 
+    def test_mail_preview_uses_saved_state(self):
+        orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw"}))
+        na.smtplib.SMTP_SSL = FakeSMTP
+        FakeSMTP.sent = []
+        try:
+            self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "서면아이파크1단지"},
+                                            "pyeong": [25]}, ensure_ascii=False))
+            self.run_main(FakeNaver({"1": [dict(art(1), price_won=800_000_000)]}))
+            before = self.state.read_text(encoding="utf-8")
+            self.assertEqual(na.mail_preview(), 0)
+            self.assertEqual(self.state.read_text(encoding="utf-8"), before)  # 기록은 그대로
+        finally:
+            na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
+        msg = [m[1] for m in FakeSMTP.sent if m[0] == "msg"][-1]
+        self.assertTrue(msg["Subject"].startswith("[매물 브리핑 미리보기]"))
+        self.assertIn("현재 매매 1건", msg.get_body(("html",)).get_content())
+
     def test_gone_history(self):
         import contextlib
         import io

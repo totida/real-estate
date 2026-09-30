@@ -814,6 +814,34 @@ def format_gone(gone: list[dict], complexes: dict, pyeongs: list[int] | None = N
     return title, "\n\n".join(sections)
 
 
+def mail_preview() -> int:
+    """네이버에 다시 조회하지 않고, 저장된 마지막 조회 결과로 브리핑 메일을 지금 보낸다 (기록은 바꾸지 않음)."""
+    global SHOW_TIME, SORT_ORDER
+    if not mail_configured():
+        print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")
+        return 1
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    SHOW_TIME = bool(config.get("show_time", True))
+    SORT_ORDER = list(config.get("sort") or ["price", "dong", "-floor"])
+    pyeongs = [int(p) for p in config.get("pyeong", [])]
+    state = load_state()
+    now = datetime.now(KST)
+    tracked = state.get("tracked") or {}
+    briefing = []
+    for no, name in (config.get("complexes") or {}).items():
+        listings = [tracked_info(state, dict(t, articleNo=t.get("rep", key)))
+                    for key, t in tracked.items() if t["complexNo"] == str(no) and not t.get("missed")]
+        briefing.append({"no": str(no), "name": name, "status": "ok", "listings": listings,
+                         "new": [], "changes": [], "gone": [], "week": recent_events(state, str(no), now)})
+    subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
+                                               parse_time(state.get("last_mail")))
+    subject = subject.replace("[매물 브리핑]", "[매물 브리핑 미리보기]", 1)
+    to = send_mail(subject, text, html_body,
+                   [(f"매매매물_{now:%Y%m%d}.csv", listings_csv(briefing), "text/csv")])
+    print(f"미리보기 메일을 보냈습니다: {to} (마지막 조회: {state.get('last_run', '-')})")
+    return 0
+
+
 def print_status() -> int:
     """기록이 잘 쌓이는지 확인용: 단지별 추적 매물 수·가격 이력·최근 7일 변동."""
     config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -1425,6 +1453,8 @@ def main() -> int:
         return print_history(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
     if sys.argv[1:2] == ["--status"]:
         return print_status()
+    if sys.argv[1:2] == ["--mail-preview"]:
+        return mail_preview()
     if sys.argv[1:2] == ["--mail-test"]:
         if not mail_configured():
             print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")
