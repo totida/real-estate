@@ -945,7 +945,8 @@ class ReviewScenarioTest(unittest.TestCase):
         _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"B": 5.9})]])
         ch = out[1][0]
         self.assertEqual([(c["broker"], c["note"], c["counts"]) for c in ch],
-                         [("중개B", "통계 제외", False), ("중개B", "최저가 중개사 빠짐", False)])
+                         [("중개B", "통계 제외", False), ("중개A", "최저가 중개사 빠짐", False)])
+        self.assertIn("articles/B", na.article_url(ch[1]))  # 빠진 A 대신 지금 최저가 매물로 연결
         self.assertEqual(na.change_counts(ch), "0")
         self.assertEqual(na.change_stats(ch), "상승 0 · 하락 0 (최저가 안 바뀐 2건 제외)")
 
@@ -1040,3 +1041,47 @@ class ReviewScenarioTest(unittest.TestCase):
     def test_10_change_shows_current_range(self):
         _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"A": 5.7, "B": 6.0, "C": 6.2})]])
         self.assertEqual(na.dup_text(out[1][0][0]), "중개사 3곳 · 5억 7,000만~6억 2,000만")
+
+
+class ReviewScenario2Test(unittest.TestCase):
+    """두 번째 검토에서 찾은 경우들."""
+    grp = ReviewScenarioTest.grp
+    run_days = ReviewScenarioTest.run_days
+
+    def one(self, no, price, broker="가공인", **kw):
+        g = self.grp({no: price}, {no: broker}, **kw)
+        g["realtor_count"] = 1
+        return g
+
+    def test_trade_type_must_match(self):
+        state, out = self.run_days([[self.one("X", 6.0)], [], [self.one("Y", 5.9, trade="전세")]])
+        self.assertEqual(out[2][2], set())            # 전세는 매매 재등록이 아님
+        self.assertEqual([g["articleNo"] for g in out[2][1]], ["X"])
+
+    def test_no_relist_when_floor_is_range(self):
+        _, out = self.run_days([[self.one("X", 6.0, floor="중/29")], [self.one("Y", 5.9, floor="중/29")]])
+        self.assertEqual(out[1][2], set())
+
+    def test_no_relist_into_multi_broker_group(self):
+        g = self.grp({"P": 5.0, "Q": 5.1}, {"P": "다공인", "Q": "가공인"})
+        _, out = self.run_days([[self.one("X", 6.0)], [g]])
+        self.assertEqual(out[1][2], set())
+
+    def test_no_relist_when_ambiguous_or_price_far(self):
+        _, out = self.run_days([[self.one("X1", 6.0), self.one("X2", 6.0)], [self.one("Y", 6.0)]])
+        self.assertEqual(out[1][2], set())            # 후보가 둘이면 잇지 않음
+        _, out = self.run_days([[self.one("X", 6.0)], [self.one("Y", 5.0)]])
+        self.assertEqual(out[1][2], set())            # 가격 차이 10% 넘으면 다른 집으로
+
+    def test_no_gone_and_relist_same_run(self):
+        _, out = self.run_days([[self.one("X", 6.0)], [], [self.one("Y", 5.9)]])
+        self.assertEqual(out[2][1], [])               # 같은 실행에서 이어지면 사라짐 아님
+        self.assertEqual(out[2][2], {"Y"})
+        self.assertEqual([x["note"] for x in out[2][0]], ["재등록"])
+
+    def test_merge_without_fake_changes(self):
+        state, out = self.run_days([[self.grp({"X": 6.0}), self.grp({"Y": 5.8})],
+                                    [self.grp({"X": 6.0, "Y": 5.8})]])
+        self.assertEqual(out[1][0], [])
+        (t,) = state["tracked"].values()
+        self.assertEqual([h for h in t["price_history"] if len(h) > 3], [])
