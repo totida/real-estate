@@ -1019,7 +1019,7 @@ def gone_line(g: dict) -> str:
         line += f" · 처음 {g['first_price']}"
     days = days_between(g.get("first_seen"), g.get("gone_date"))
     if days is not None:
-        line += f" · {g['first_seen'][5:].replace('-', '/')}부터 {days}일 게시"
+        line += f" · {md(g['first_seen'])}부터 {days}일 게시"
     return line
 
 
@@ -1154,7 +1154,7 @@ def print_history(limit: int = 30, path: Path | None = None) -> int:
         posted = f" · {days}일 게시" if days is not None else ""
         where = " ".join(x for x in (r["동"], floor_text(r["층"])) if x)
         size = f"{r['평']}평" if r["평"] else ""
-        print(" · ".join(x for x in (f"{r['사라진날'][5:]} {r['단지']}", f"[{r['거래']}] {price}",
+        print(" · ".join(x for x in (f"{md(r['사라진날'])} {r['단지']}", f"[{r['거래']}] {price}",
                                      where, size) if x) + posted)
     return 0
 
@@ -1166,7 +1166,7 @@ def format_message(new: list[dict], complexes: dict,
     size = f" {size_label(pyeongs)}" if pyeongs else ""
     names = list(dict.fromkeys(complexes.get(a["complexNo"], a["name"]) for a in new))
     where = names[0] + (f" 외 {len(names) - 1}곳" if len(names) > 1 else "")
-    title = f"🏠{size} 새 매물 {len(new)}건 · {where} ({datetime.now(KST):%m/%d %H:%M})"
+    title = f"🏠{size} 새 매물 {len(new)}건 · {where} ({md(datetime.now(KST))} {datetime.now(KST):%H:%M})"
     sections = []
     for cname in names:
         lines = [f"### {cname}"]
@@ -1360,6 +1360,17 @@ def listings_csv(reports: list[dict]) -> bytes:
     return buf.getvalue().encode("utf-8-sig")  # 엑셀에서 한글이 깨지지 않게 BOM
 
 
+def md(d) -> str:
+    """'9/9' 형식 날짜 (앞의 0 없이). datetime 이나 '2026-09-09…' 문자열을 받는다."""
+    if isinstance(d, datetime):
+        return f"{d.month}/{d.day}"
+    try:
+        _, m, day = str(d)[:10].split("-")
+        return f"{int(m)}/{int(day)}"
+    except ValueError:
+        return str(d or "")
+
+
 # 하루 한 번만 조회하면 시각은 의미가 없어 날짜만 쓴다 (config.json 의 show_time)
 SHOW_TIME = True
 
@@ -1367,9 +1378,9 @@ SHOW_TIME = True
 def time_label(dt: datetime, with_date: bool = True) -> str:
     """'10/03 오후 1시' (with_date=False 면 '오후 1시'). SHOW_TIME 이 꺼져 있으면 '10/03'."""
     if not SHOW_TIME:
-        return f"{dt:%m/%d}"
+        return md(dt)
     t = f"{'오전' if dt.hour < 12 else '오후'} {dt.hour % 12 or 12}시"
-    return f"{dt:%m/%d} {t}" if with_date else t
+    return f"{md(dt)} {t}" if with_date else t
 
 
 def parse_time(iso: str | None) -> datetime | None:
@@ -1426,7 +1437,7 @@ def event_text(e: dict) -> str:
 def stamp_label(stamp: str) -> str:
     """'2026-10-03T13:00+09:00' → '10/03 오후 1시', 날짜만 있으면 '10/03'."""
     dt = parse_time(stamp) if "T" in str(stamp) else None
-    return time_label(dt) if dt else str(stamp)[5:].replace("-", "/")
+    return time_label(dt) if dt else md(stamp)
 
 
 def recent_price_changes(a: dict, n: int = 2) -> list[str]:
@@ -1532,7 +1543,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     all_stats = change_stats([c for r in ok for c in r.get("changes", [])])
     day = time_label(now)  # 하루 여러 번 받아도 구분되게
     if since and not SHOW_TIME:
-        window = f"{since:%m/%d} ~ {now:%m/%d}"
+        window = f"{md(since)} ~ {md(now)}"
     elif since:
         same_day = since.date() == now.date()
         window = f"{time_label(since, with_date=not same_day)} ~ {time_label(now, with_date=False)}"
@@ -1692,7 +1703,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                      '<th align="left">동·층</th><th>평</th><th>변동</th><th>등록</th></tr>')
             for a in rows:
                 d = diff_text(a.get("first_price_won"), a.get("price_won"))
-                seen = (a.get("first_seen") or "")[5:].replace("-", "/")
+                seen = md(a.get("first_seen") or "")
                 place = " ".join(x for x in (a.get("building", ""), a.get("floor", "")) if x)
                 place += "층" if a.get("floor") else ""
                 p = pyeong_of(a)

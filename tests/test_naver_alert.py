@@ -98,7 +98,7 @@ class DiffTest(unittest.TestCase):
         info = na.tracked_info(state, g2)
         self.assertEqual((info["link_no"], info["price"]), ("1", "7억 8,000만"))
         self.assertEqual(info["first_price_won"], 790_000_000)
-        self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
+        self.assertEqual(na.recent_price_changes(info), ["9/29 8억 → 7억 8,000만 ▼2,000만"])
 
     def test_broker_price_scenarios(self):
         def grp(prices, rep="1"):
@@ -128,12 +128,12 @@ class DiffTest(unittest.TestCase):
         state, ch = {}, []
         na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 600_000_000, "3": 600_000_000})],
                           "2026-10-01", changes=ch, stamp="2026-10-01T10:00+09:00")
-        # 10/02 A 6억2천으로 올림: 최저가(6억) 그대로 → 목록엔 있지만 통계 제외
+        # 10/2 A 6억2천으로 올림: 최저가(6억) 그대로 → 목록엔 있지만 통계 제외
         g = grp({"1": 600_000_000, "2": 620_000_000, "3": 600_000_000})
         na.track_listings(state, "1", [g], "2026-10-02", changes=ch, stamp="2026-10-02T10:00+09:00")
         self.assertEqual(na.tracked_info(state, g)["price"], "6억")
         self.assertEqual((ch[0]["broker"], na.follow_text(ch[0]), na.counted(ch[0])), ("A부동산", "최저가 그대로", False))
-        # 10/03 B 5억8천으로 내림: 최저가 6억 → 5억8천 → 통계에 하락 1
+        # 10/3 B 5억8천으로 내림: 최저가 6억 → 5억8천 → 통계에 하락 1
         g = grp({"1": 600_000_000, "2": 620_000_000, "3": 580_000_000})
         na.track_listings(state, "1", [g], "2026-10-03", changes=ch, stamp="2026-10-03T10:00+09:00")
         info = na.tracked_info(state, g)
@@ -143,10 +143,10 @@ class DiffTest(unittest.TestCase):
         self.assertTrue(na.counted(ch[1]))
         self.assertEqual(na.change_stats(ch), "상승 0 · 하락 1 · 평균 ▼2,000만 (-3.3%) (최저가 안 바뀐 1건 제외)")
         self.assertEqual(na.dup_text(info), "중개사 3곳 · 5억 8,000만~6억 2,000만")
-        self.assertEqual(na.recent_price_changes(info, 1), ["10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만"])
+        self.assertEqual(na.recent_price_changes(info, 1), ["10/3 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만"])
 
     def test_second_cut_above_lowest(self):
-        # 모두 6억 → 10/02 A 5억8천 → 10/03 B 5억9천: 표는 최저 5억8천 유지, B 변동은 통계 제외
+        # 모두 6억 → 10/2 A 5억8천 → 10/3 B 5억9천: 표는 최저 5억8천 유지, B 변동은 통계 제외
         def grp(p):
             return {"articleNo": "1", "aliases": ["2", "3"], "complexNo": "1", "trade": "매매",
                     "price": na.won_text(p["1"]), "price_won": p["1"], "member_prices": p,
@@ -315,7 +315,7 @@ class ParseTest(unittest.TestCase):
         self.assertIn("25~26평 사라진 매물 1건 · 서면아이파크2단지", title)
         self.assertIn("[매매] 7억 5,000만 · 101동 10층 (총 30층)", body)
         self.assertIn("처음 8억", body)
-        self.assertIn("09/18부터 12일 게시", body)
+        self.assertIn("9/18부터 12일 게시", body)
 
     def test_format_message(self):
         cx = {"7": "서면아이파크2단지", "8": "연산더샵"}
@@ -519,7 +519,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(msgs[0]["To"], "a@example.com, b@example.com")
         self.assertIn("신규 1 · 가격변동 1", msgs[0]["Subject"])  # 9시 신규도 10시 메일에
         body = msgs[0].get_body(("html",)).get_content()
-        self.assertIn("10/03 오전 9시 확인", body)
+        self.assertIn("10/3 오전 9시 확인", body)
         att = [p for p in msgs[0].iter_attachments()]
         self.assertEqual(att[0].get_filename(), "매매매물_20261003.csv")
         self.assertTrue(all(e.get("mailed") for e in na.load_state()["events"]))
@@ -614,9 +614,9 @@ class BriefingTest(unittest.TestCase):
             {"no": "9", "name": "양정", "status": "failed", "error": "429"},
         ]
         subject, text, body = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, 13, tzinfo=na.KST))
-        self.assertEqual(subject, "[매물 브리핑] 10/03 오후 1시 25~26평 · 신규 1 · 가격변동 1 · 사라짐 0")
+        self.assertEqual(subject, "[매물 브리핑] 10/3 오후 1시 25~26평 · 신규 1 · 가격변동 1 · 사라짐 0")
         _, text, _ = na.format_briefing(reports, "25~26평", datetime(2026, 10, 3, 8, tzinfo=na.KST))
-        self.assertTrue(text.startswith("10/03 오전 8시 매물 브리핑"))
+        self.assertTrue(text.startswith("10/3 오전 8시 매물 브리핑"))
         self.assertIn('href="https://fin.land.naver.com/complexes/7?tab=article"', body)  # 단지 링크
         self.assertIn('href="https://fin.land.naver.com/articles/6"', body)  # 신규 매물 링크
         self.assertIn("8억 5,000만 → 8억", body)
@@ -656,11 +656,11 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("이번 변동: 오전 8시 ~ 오후 1시 사이", text)  # 같은 날이면 날짜 생략
         self.assertIn("이번 변동 없음", text)
         self.assertIn("최근 7일 변동 2건", body)
-        self.assertIn("10/03 오전 8시 [가격] [매매] 6억 2,000만 → 5억 9,000만 (▼3,000만)", text)
-        self.assertIn("10/02 오후 8시 [사라짐] [매매] 5억 7,000만", text)
+        self.assertIn("10/3 오전 8시 [가격] [매매] 6억 2,000만 → 5억 9,000만 (▼3,000만)", text)
+        self.assertIn("10/2 오후 8시 [사라짐] [매매] 5억 7,000만", text)
         self.assertIn('href="https://fin.land.naver.com/articles/5"', body)
         _, text, _ = na.format_briefing([r], "25~26평", now, datetime(2026, 10, 2, 20, tzinfo=na.KST))
-        self.assertIn("10/02 오후 8시 ~ 오후 1시 사이", text)
+        self.assertIn("10/2 오후 8시 ~ 오후 1시 사이", text)
 
     def test_recent_price_changes(self):
         state, changes = {}, []
@@ -671,16 +671,16 @@ class BriefingTest(unittest.TestCase):
                               f"2026-10-0{i}", changes=changes, stamp=stamp)
         a = na.tracked_info(state, art(1))
         self.assertEqual(na.recent_price_changes(a), [
-            "10/03 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만",
-            "10/02 오전 8시 7억 8,000만 → 7억 6,000만 ▼2,000만"])
+            "10/3 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만",
+            "10/2 오전 8시 7억 8,000만 → 7억 6,000만 ▼2,000만"])
         r = {"no": "1", "name": "A", "status": "ok", "new": [], "changes": [], "gone": [],
              "listings": [dict(a, trade="매매", price="7억 7,000만", price_won=770_000_000)]}
         _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, 13, tzinfo=na.KST))
-        self.assertIn("↳ 10/03 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만", text)
+        self.assertIn("↳ 10/3 오후 1시 7억 6,000만 → 7억 7,000만 ▲1,000만", text)
         self.assertIn("(이전 변동 2건)", text)
         # HTML: 최근 1개는 바로 보이고 나머지는 펼치기 안에
-        self.assertIn("이전 변동 2건 ▾</summary>10/02 오전 8시 7억 8,000만 → 7억 6,000만", body)
-        self.assertLess(body.index("10/03 오후 1시 7억 6,000만"), body.index("<details"))
+        self.assertIn("이전 변동 2건 ▾</summary>10/2 오전 8시 7억 8,000만 → 7억 6,000만", body)
+        self.assertLess(body.index("10/3 오후 1시 7억 6,000만"), body.index("<details"))
 
     def test_date_only(self):
         na.SHOW_TIME = False
@@ -688,10 +688,10 @@ class BriefingTest(unittest.TestCase):
             r = {"no": "7", "name": "A", "status": "ok", "listings": [], "new": [], "changes": [], "gone": []}
             subject, text, _ = na.format_briefing([r], "25~26평", datetime(2026, 10, 3, 10, tzinfo=na.KST),
                                                   datetime(2026, 10, 2, 10, tzinfo=na.KST))
-            self.assertTrue(subject.startswith("[매물 브리핑] 10/03 25~26평"))
-            self.assertIn("이번 변동: 10/02 ~ 10/03 사이", text)
+            self.assertTrue(subject.startswith("[매물 브리핑] 10/3 25~26평"))
+            self.assertIn("이번 변동: 10/2 ~ 10/3 사이", text)
             self.assertNotIn("오전", text)
-            self.assertEqual(na.stamp_label("2026-10-03T10:00+09:00"), "10/03")
+            self.assertEqual(na.stamp_label("2026-10-03T10:00+09:00"), "10/3")
         finally:
             na.SHOW_TIME = True
 
@@ -1154,7 +1154,7 @@ class CompositionWordingTest(unittest.TestCase):
         hist = [["2026-10-01", "5억 1,000만", 510_000_000],
                 ["2026-10-02", "5억 3,000만", 530_000_000, "5억 1,000만", 510_000_000, "양정공인", "최저가 중개사 빠짐"]]
         self.assertEqual(na.recent_price_changes({"price_history": hist}),
-                         ["10/02 양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만 ▲2,000만"])
+                         ["10/2 양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만 ▲2,000만"])
 
 
 class UnitTypeTest(unittest.TestCase):
@@ -1176,3 +1176,11 @@ class UnitTypeTest(unittest.TestCase):
         rows = list(_csv.DictReader(na.listings_csv([r]).decode("utf-8-sig").splitlines()))
         self.assertEqual(rows[0]["타입"], "59A")
         self.assertEqual(na.type_code({"unit_type": "B", "exclusive": 84.96}), "84B")
+
+
+class DateFormatTest(unittest.TestCase):
+    def test_md(self):
+        self.assertEqual(na.md("2026-09-09"), "9/9")
+        self.assertEqual(na.md("2026-10-03T10:00+09:00"), "10/3")
+        self.assertEqual(na.md(datetime(2026, 1, 15, tzinfo=na.KST)), "1/15")
+        self.assertEqual(na.md(""), "")
