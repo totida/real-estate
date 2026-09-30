@@ -692,14 +692,24 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
             new_members = dict(cur.get("member_prices") or {})
             if not new_members and cur.get("price_won"):
                 new_members = {cur["articleNo"]: cur["price_won"]}
-            # 같은 매물번호(같은 중개사 매물)의 호가가 바뀐 것만 가격 변동으로 본다
+            # 같은 매물번호(같은 중개사 매물)의 호가가 바뀐 것을 가격 변동으로 본다
             moved = [(no, old_members[no], won) for no, won in new_members.items()
                      if old_members.get(no) and won and old_members[no] != won]
+            # 중개사가 가격을 바꾸면서 매물을 지우고 새 번호로 다시 올린 경우: 빠진 번호와 새 번호를 짝지음
+            if new_members and old_members:
+                now_ids = {cur["articleNo"], *cur.get("aliases", [])}
+                old_ids = {key, before.get("rep", key), *before.get("aliases", [])}
+                removed = sorted((won, no) for no, won in old_members.items()
+                                 if no not in new_members and no not in now_ids)
+                added = sorted((won, no) for no, won in new_members.items()
+                               if no not in old_members and no not in old_ids)
+                for (old_won, _), (new_won, no) in zip(removed, added):
+                    if old_won != new_won:
+                        moved.append((no, old_won, new_won))
             moved.sort(key=lambda m: m[0] != cur["articleNo"])  # 대표 매물 우선
-            if moved:
-                no, old_won, new_won = moved[0]
+            for no, old_won, new_won in moved:
                 old_txt, new_txt = won_text(old_won), won_text(new_won)
-                t["price_history"] = [*before.get("price_history", []),
+                t["price_history"] = [*t.get("price_history", before.get("price_history", [])),
                                       [stamp or today, new_txt, new_won, old_txt, old_won]][-10:]
                 if changes is not None:
                     changes.append(dict(t, articleNo=no, price=new_txt, price_won=new_won,
@@ -711,7 +721,7 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
             for no, won in new_members.items():
                 firsts.setdefault(no, won)
             t["member_first"] = firsts
-            t["member_prices"] = {**old_members, **new_members}
+            t["member_prices"] = new_members or old_members  # 지금 올라와 있는 중개사 매물만
             t["rep"] = cur["articleNo"]
             t["aliases"] = sorted(set(t.get("aliases", [])) | {cur["articleNo"], *cur.get("aliases", [])}
                                   - {key})

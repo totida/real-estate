@@ -99,6 +99,26 @@ class DiffTest(unittest.TestCase):
         self.assertEqual(info["first_price_won"], 790_000_000)
         self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
 
+    def test_broker_price_scenarios(self):
+        def grp(prices, rep="1"):
+            return {"articleNo": rep, "aliases": [k for k in prices if k != rep], "complexNo": "1",
+                    "trade": "매매", "price": na.won_text(prices[rep]), "price_won": prices[rep],
+                    "member_prices": prices}
+        base = {"1": 600_000_000, "2": 600_000_000, "3": 600_000_000}
+        cases = {
+            "올림": ({"1": 600_000_000, "2": 620_000_000, "3": 600_000_000}, [("2", "6억", "6억 2,000만")]),
+            "내림": ({"1": 600_000_000, "2": 600_000_000, "3": 580_000_000}, [("3", "6억", "5억 8,000만")]),
+            "동시": ({"1": 600_000_000, "2": 620_000_000, "3": 580_000_000},
+                   [("2", "6억", "6억 2,000만"), ("3", "6억", "5억 8,000만")]),
+            "재등록": ({"1": 600_000_000, "2": 600_000_000, "4": 580_000_000}, [("4", "6억", "5억 8,000만")]),
+            "그대로 재등록": ({"1": 600_000_000, "2": 600_000_000, "4": 600_000_000}, []),
+        }
+        for name, (day2, want) in cases.items():
+            state, ch = {}, []
+            na.track_listings(state, "1", [grp(base)], "2026-10-01", changes=ch)
+            na.track_listings(state, "1", [grp(day2)], "2026-10-02", changes=ch)
+            self.assertEqual([(c["articleNo"], c["old_price"], c["price"]) for c in ch], want, name)
+
     def test_change_stats(self):
         cs = [{"old_price_won": 600_000_000, "price_won": 620_000_000},
               {"old_price_won": 500_000_000, "price_won": 480_000_000},
