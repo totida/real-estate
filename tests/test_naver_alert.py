@@ -94,10 +94,10 @@ class DiffTest(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         c = changes[0]
         self.assertEqual((c["articleNo"], c["old_price"], c["price"]), ("1", "8억", "7억 8,000만"))
-        # 표에는 가장 최근에 호가를 바꾼 중개사(1번) 가격, 처음 대비는 이 집을 처음 본 가격과 비교
+        # 표에는 그 집의 최저 호가(1번 7억8천), 처음 대비는 처음 봤을 때 최저 호가(7억9천)와 비교
         info = na.tracked_info(state, g2)
         self.assertEqual((info["articleNo"], info["price"]), ("1", "7억 8,000만"))
-        self.assertEqual(info["first_price_won"], 800_000_000)
+        self.assertEqual(info["first_price_won"], 790_000_000)
         self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
 
     def test_broker_price_scenarios(self):
