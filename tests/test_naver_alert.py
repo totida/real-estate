@@ -558,7 +558,8 @@ class MainTest(unittest.TestCase):
     def test_mail_preview_uses_saved_state(self):
         orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
         na.LOCAL_PATH = self.tmp / "local.json"
-        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw"}))
+        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw",
+                                             "MAIL_TO": "a@example.com, b@example.com"}))
         na.smtplib.SMTP_SSL = FakeSMTP
         FakeSMTP.sent = []
         try:
@@ -566,12 +567,16 @@ class MainTest(unittest.TestCase):
                                             "pyeong": [25]}, ensure_ascii=False))
             self.run_main(FakeNaver({"1": [dict(art(1), price_won=800_000_000)]}))
             before = self.state.read_text(encoding="utf-8")
+            self.assertEqual(na.mail_preview(to_self=False), 0)
+            self.assertEqual([m[1] for m in FakeSMTP.sent if m[0] == "msg"][-1]["To"],
+                             "a@example.com, b@example.com")  # --all 이면 받는 사람 전체
             self.assertEqual(na.mail_preview(), 0)
             self.assertEqual(self.state.read_text(encoding="utf-8"), before)  # 기록은 그대로
         finally:
             na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
         msg = [m[1] for m in FakeSMTP.sent if m[0] == "msg"][-1]
         self.assertTrue(msg["Subject"].startswith("[매물 브리핑 미리보기]"))
+        self.assertEqual(msg["To"], "me@example.com")  # 기본은 보내는 주소로만
         self.assertIn("현재 매매 1건", msg.get_body(("html",)).get_content())
 
     def test_gone_history(self):

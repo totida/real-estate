@@ -1035,8 +1035,11 @@ def format_gone(gone: list[dict], complexes: dict, pyeongs: list[int] | None = N
     return title, "\n\n".join(sections)
 
 
-def mail_preview() -> int:
-    """네이버에 다시 조회하지 않고, 저장된 마지막 조회 결과로 브리핑 메일을 지금 보낸다 (기록은 바꾸지 않음)."""
+def mail_preview(to_self: bool = True) -> int:
+    """네이버에 다시 조회하지 않고, 저장된 마지막 조회 결과로 브리핑 메일을 지금 보낸다 (기록은 바꾸지 않음).
+
+    테스트용이라 기본은 보내는 주소(SMTP_USER)로만, --all 이면 MAIL_TO 전체로.
+    """
     global SHOW_TIME, SORT_ORDER
     if not mail_configured():
         print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")
@@ -1059,7 +1062,7 @@ def mail_preview() -> int:
                                                parse_time(state.get("last_mail")))
     subject = subject.replace("[매물 브리핑]", "[매물 브리핑 미리보기]", 1)
     to = send_mail(subject, text, html_body,
-                   [(f"매매매물_{now:%Y%m%d}.csv", listings_csv(briefing), "text/csv")])
+                   [(f"매매매물_{now:%Y%m%d}.csv", listings_csv(briefing), "text/csv")], to_self=to_self)
     print(f"미리보기 메일을 보냈습니다: {to} (마지막 조회: {state.get('last_run', '-')})")
     return 0
 
@@ -1709,7 +1712,7 @@ def mail_configured() -> bool:
 
 
 def send_mail(subject: str, text: str, html_body: str | None = None,
-              attachments: list[tuple[str, bytes, str]] | None = None) -> str:
+              attachments: list[tuple[str, bytes, str]] | None = None, to_self: bool = False) -> str:
     """Gmail 등 SMTP 로 메일을 보내고 받는 주소를 돌려준다.
 
     local.json(또는 환경변수)의 SMTP_USER, SMTP_PASSWORD(Gmail 앱 비밀번호),
@@ -1717,7 +1720,9 @@ def send_mail(subject: str, text: str, html_body: str | None = None,
     """
     user, password = setting("SMTP_USER"), setting("SMTP_PASSWORD").replace(" ", "")
     # 받는 주소는 쉼표로 여러 개 적을 수 있다
-    to = ", ".join(x.strip() for x in (setting("MAIL_TO") or user).split(",") if x.strip())
+    # to_self 면 보내는 주소로만 (테스트용)
+    to = ", ".join(x.strip() for x in ((user if to_self else setting("MAIL_TO")) or user).split(",")
+                   if x.strip())
     msg = EmailMessage()
     msg["Subject"], msg["From"], msg["To"] = subject, user, to
     msg.set_content(text)
@@ -1775,7 +1780,7 @@ def main() -> int:
     if sys.argv[1:2] == ["--status"]:
         return print_status()
     if sys.argv[1:2] == ["--mail-preview"]:
-        return mail_preview()
+        return mail_preview(to_self="--all" not in sys.argv[2:])
     if sys.argv[1:2] == ["--check-brokers"]:
         return check_brokers(sys.argv[2] if len(sys.argv) > 2 else None)
     if sys.argv[1:2] == ["--mail-test"]:

@@ -66,6 +66,7 @@ termux-wake-lock
    `MAIL_TO` 를 빼면 보내는 주소로 받습니다. Gmail 이 아니면 `SMTP_HOST`, `SMTP_PORT`(SSL) 를 추가합니다.
 3. `python naver_alert.py --mail-test` 로 테스트 메일을 확인합니다.
 4. `python naver_alert.py --mail-preview` 는 네이버에 다시 조회하지 않고 마지막 조회 결과로 브리핑 메일을 지금 보냅니다 (기록은 바뀌지 않음).
+   테스트용이라 보내는 주소로만 가고, `--mail-preview --all` 이면 `MAIL_TO` 전체로 보냅니다.
 
 ## 설정
 - **단지 추가/삭제**: `config.json`의 `complexes`를 수정합니다.
