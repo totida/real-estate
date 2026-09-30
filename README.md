@@ -91,6 +91,7 @@ termux-wake-lock
   짧은 시간에 여러 번 실행하면 차단이 길어집니다.
 - **크로미움 실행 실패**: 오류에 나온 로그를 확인하고, `CHROMIUM_XVFB=1 python naver_alert.py` 로 시도해 보세요.
 - 실행 기록: `tail -50 ~/alert.log`
+- 중개사별 호가 수신 점검: `python naver_alert.py --check-brokers [단지번호]` (한 페이지만 조회, 기록 안 바꿈)
 - 기록 상태 확인: `python naver_alert.py --status` (단지별 추적 매물·가격 이력·최근 7일 변동)
 - 사라진 매물 기록: `python naver_alert.py --history` (최근 30건, `--history 100` 처럼 개수 지정)
 - 층수: 중개사가 층을 공개하지 않은 매물은 네이버에서도 `저/중/고층`으로만 나옵니다.

@@ -430,31 +430,34 @@ class NaverLand:
             self._browser = browser
         return self._browser
 
+    def fetch_page(self, complex_no: str, trade_types: list[str], last_info: list) -> dict:
+        """매물 목록 한 페이지(result)."""
+        payload = {
+            "size": 30, "complexNumber": complex_no, "tradeTypes": trade_types,
+            "pyeongTypes": [], "dongNumbers": [], "userChannelType": "PC",
+            # seed 고정: 매번 바꾸면 순서·대표 매물이 달라져 변동 추적이 흔들린다
+            "articleSortType": "RANKING_DESC", "seed": "naver-alert", "lastInfo": last_info,
+        }
+        status, text = self._page().fetch_json(self.fin + self.ARTICLE_API, payload)
+        if status == 429:
+            raise BlockedError(f"네이버가 요청을 막았습니다(429): {text[:200]}")
+        if status != 200:
+            raise RuntimeError(f"매물 API 응답 {status}: {text[:200]}")
+        try:
+            data = json.loads(text)
+        except ValueError:
+            data = None
+        # 실패 응답을 '매물 0건' 으로 저장하면 다음 조회 때 모든 매물이 새 매물로 알림되므로 오류로 처리
+        if (not isinstance(data, dict) or data.get("isSuccess") is False
+                or not isinstance(data.get("result"), dict)):
+            raise RuntimeError(f"매물 API 예상 밖 응답: {text[:200]}")
+        return data["result"]
+
     def articles(self, complex_no: str, trade_types: list[str]) -> list[dict]:
-        page = self._page()
         out: list[dict] = []
         last_info: list = []
-        seed = "naver-alert"  # 고정: 매번 바꾸면 순서·대표 매물이 달라져 변동 추적이 흔들린다
         for _ in range(50):
-            payload = {
-                "size": 30, "complexNumber": complex_no, "tradeTypes": trade_types,
-                "pyeongTypes": [], "dongNumbers": [], "userChannelType": "PC",
-                "articleSortType": "RANKING_DESC", "seed": seed, "lastInfo": last_info,
-            }
-            status, text = page.fetch_json(self.fin + self.ARTICLE_API, payload)
-            if status == 429:
-                raise BlockedError(f"네이버가 요청을 막았습니다(429): {text[:200]}")
-            if status != 200:
-                raise RuntimeError(f"매물 API 응답 {status}: {text[:200]}")
-            try:
-                data = json.loads(text)
-            except ValueError:
-                data = None
-            # 실패 응답을 '매물 0건' 으로 저장하면 다음 조회 때 모든 매물이 새 매물로 알림되므로 오류로 처리
-            if (not isinstance(data, dict) or data.get("isSuccess") is False
-                    or not isinstance(data.get("result"), dict)):
-                raise RuntimeError(f"매물 API 예상 밖 응답: {text[:200]}")
-            result = data["result"]
+            result = self.fetch_page(complex_no, trade_types, last_info)
             out += [normalize_fin(item, complex_no) for item in result.get("list") or []]
             if not result.get("hasNextPage"):
                 break
@@ -839,6 +842,45 @@ def mail_preview() -> int:
     to = send_mail(subject, text, html_body,
                    [(f"매매매물_{now:%Y%m%d}.csv", listings_csv(briefing), "text/csv")])
     print(f"미리보기 메일을 보냈습니다: {to} (마지막 조회: {state.get('last_run', '-')})")
+    return 0
+
+
+def check_brokers(complex_no: str | None = None) -> int:
+    """네이버에 한 페이지만 조회해, 대표가 아닌 중개사들의 호가가 응답에 들어있는지 확인한다.
+
+    저장된 기록은 전혀 바꾸지 않는다.
+    """
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    complexes = {str(k): v for k, v in (config.get("complexes") or {}).items()}
+    no = complex_no or next(iter(complexes))
+    naver = NaverLand()
+    try:
+        result = naver.fetch_page(no, config.get("trade_types", ["A1"]), [])
+    finally:
+        naver.close()
+    items = result.get("list") or []
+    groups = [i for i in items if ((i.get("duplicatedArticleInfo") or {}).get("realtorCount") or 1) > 1]
+    print(f"{complexes.get(no, no)} ({no}) 첫 페이지 매물 {len(items)}건 중 여러 중개사 매물 {len(groups)}건")
+    ok = 0
+    for i in groups[:3]:
+        dup = i["duplicatedArticleInfo"]
+        members = dup.get("articleInfoList") or []
+        a = normalize_fin(i, no)
+        print(f"- 대표 {a['articleNo']} {a['price']} · 중개사 {dup.get('realtorCount')}곳 · 목록 {len(members)}건")
+        if members:
+            m = members[0]
+            print(f"  다른 중개사 매물 항목: {sorted(m.keys())}")
+            print(f"  priceInfo: {json.dumps(m.get('priceInfo'), ensure_ascii=False)[:200]}")
+        print("  읽은 중개사별 호가: " + (" / ".join(
+            f"{(a['member_brokers'] or {}).get(k, k)} {won_text(w)}"
+            for k, w in sorted(a["member_prices"].items(), key=lambda x: x[1])) or "없음"))
+        ok += len(a["member_prices"]) > 1
+    if not groups:
+        print("결과: 첫 페이지에 여러 중개사 매물이 없어 판단할 수 없습니다. 다른 단지번호로 해보세요.")
+    elif ok:
+        print(f"결과: ✅ 대표 외 중개사 호가도 받고 있습니다 ({ok}/{min(len(groups), 3)}건 확인)")
+    else:
+        print("결과: ❌ 대표 중개사 호가만 들어옵니다. 위 '다른 중개사 매물 항목' 줄을 알려주세요.")
     return 0
 
 
@@ -1455,6 +1497,8 @@ def main() -> int:
         return print_status()
     if sys.argv[1:2] == ["--mail-preview"]:
         return mail_preview()
+    if sys.argv[1:2] == ["--check-brokers"]:
+        return check_brokers(sys.argv[2] if len(sys.argv) > 2 else None)
     if sys.argv[1:2] == ["--mail-test"]:
         if not mail_configured():
             print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")

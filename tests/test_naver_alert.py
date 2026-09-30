@@ -808,6 +808,10 @@ class ChromiumIntegrationTest(unittest.TestCase):
                     "articleNumber": 1000 + page, "tradeType": "A1",
                     "priceInfo": {"dealPrice": 800_000_000},
                     "spaceInfo": {"supplySpace": 83, "exclusiveSpace": 59}}}]
+                if payload["complexNumber"] == "dup":
+                    items[0]["duplicatedArticleInfo"] = {"realtorCount": 2, "articleInfoList": [
+                        {"articleNumber": 2000, "priceInfo": {"dealPrice": 790_000_000},
+                         "brokerInfo": {"brokerageName": "XX부동산"}}]}
                 result = {"list": items, "hasNextPage": page == 1, "lastInfo": ["p", page]}
                 body = json.dumps({"isSuccess": True, "result": result}).encode()
                 self.send_response(200)
@@ -833,6 +837,24 @@ class ChromiumIntegrationTest(unittest.TestCase):
                 naver.articles("bad", ["A1"])
         finally:
             naver.close()
+
+    def test_check_brokers(self):
+        import contextlib
+        import io
+        import tempfile
+        cfg = Path(tempfile.mkdtemp()) / "config.json"
+        cfg.write_text(json.dumps({"complexes": {"dup": "A"}, "trade_types": ["A1"]}))
+        orig = (na.CONFIG_PATH, na.NaverLand.FIN)
+        na.CONFIG_PATH, na.NaverLand.FIN = cfg, self.base
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                na.check_brokers()
+        finally:
+            na.CONFIG_PATH, na.NaverLand.FIN = orig
+        self.assertIn("여러 중개사 매물 1건", out.getvalue())
+        self.assertIn("XX부동산 7억 9,000만", out.getvalue())
+        self.assertIn("✅", out.getvalue())
 
     def test_articles_via_xvfb(self):
         import shutil
