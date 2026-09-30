@@ -924,7 +924,7 @@ class ReviewScenarioTest(unittest.TestCase):
 
     @staticmethod
     def grp(prices, brokers=None, rep=None, **kw):
-        prices = {k: int(v * 100_000_000) for k, v in prices.items()}
+        prices = {k: round(v * 100_000_000) for k, v in prices.items()}
         rep = rep or next(iter(prices))
         low = min(prices.values())
         return dict({"articleNo": rep, "aliases": [k for k in prices if k != rep], "complexNo": "1",
@@ -1129,3 +1129,24 @@ class ReviewScenario3Test(unittest.TestCase):
         na.track_listings(state, "1", [self.grp({"X": 6.0, "Y": 5.8})], "2026-10-02", changes=ch)
         self.assertEqual(ch, [])                        # 가짜 '더 싼 중개사 추가' 없음
         self.assertEqual(len(state["tracked"]), 1)
+
+
+class CompositionWordingTest(unittest.TestCase):
+    def test_left_and_added_wording(self):
+        _, out = ReviewScenarioTest.run_days(ReviewScenarioTest, [
+            [ReviewScenarioTest.grp({"A": 5.1, "B": 5.3}, {"A": "양정공인", "B": "나공인"})],
+            [ReviewScenarioTest.grp({"B": 5.3}, {"B": "나공인"})]])
+        c = out[1][0][0]
+        self.assertEqual(na.move_text(c), "양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만")
+        self.assertEqual(na.note_text(c), "")
+        r = {"no": "1", "name": "A", "status": "ok", "listings": [], "new": [], "changes": [c], "gone": [],
+             "week": [{"at": "2026-10-02T10:00+09:00", "kind": "change", "item": c}]}
+        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 2, 10, tzinfo=na.KST))
+        self.assertIn("[매매] 양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만 (▲2,000만) ·", text)
+        self.assertNotIn("(최저가 중개사 빠짐)", body)
+        self.assertEqual(na.move_text({"broker": "다공인", "old_price": "6억", "price": "5억 6,000만",
+                                       "note": "더 싼 중개사 추가"}), "다공인 추가 · 최저가 6억 → 5억 6,000만")
+        hist = [["2026-10-01", "5억 1,000만", 510_000_000],
+                ["2026-10-02", "5억 3,000만", 530_000_000, "5억 1,000만", 510_000_000, "양정공인", "최저가 중개사 빠짐"]]
+        self.assertEqual(na.recent_price_changes({"price_history": hist}),
+                         ["10/02 양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만 ▲2,000만"])

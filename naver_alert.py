@@ -1385,9 +1385,8 @@ def recent_events(state: dict, complex_no: str, now: datetime, days: int = 7) ->
 def event_text(e: dict) -> str:
     a = e["item"]
     if e["kind"] == "change":
-        fol = follow_text(a)
-        who = f"{a['broker']} " if a.get("broker") else ""
-        return (f"[{a.get('trade')}] {who}{a.get('old_price')} → {a.get('price')} ({change_diff(a)})"
+        fol = note_text(a)
+        return (f"[{a.get('trade')}] {move_text(a)} ({change_diff(a)})"
                 + (f" [{fol}]" if fol else "") + f" · {where_text(a)}")
     if e["kind"] == "gone":
         days = days_between(a.get("first_seen"), a.get("gone_date"))
@@ -1410,10 +1409,12 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
     for prev, cur in list(zip(hist, hist[1:]))[-n:][::-1]:
         old_txt, old_won = (cur[3], cur[4]) if len(cur) > 4 else (prev[1], prev[2] if len(prev) > 2 else None)
         d = diff_text(old_won, cur[2] if len(cur) > 2 else None)
-        who = f"{cur[5]} " if len(cur) > 5 and cur[5] else ""
+        who = cur[5] if len(cur) > 5 and cur[5] else ""
         note = cur[6] if len(cur) > 6 else ""
-        fol = f" ({'뒤따라' if note is True else note})" if note else ""
-        out.append(f"{stamp_label(cur[0])} {who}{old_txt} → {cur[1]}" + (f" {d}" if d else "") + fol)
+        note = "뒤따라" if note is True else (note or "")
+        fol = f" ({note})" if note and note not in COMPOSITION_NOTES else ""
+        out.append(f"{stamp_label(cur[0])} {move_text({}, old_txt, cur[1], who, note)}"
+                   + (f" {d}" if d else "") + fol)
     return out
 
 
@@ -1442,6 +1443,28 @@ def counted(c: dict) -> bool:
 def stat_pair(c: dict) -> tuple:
     """통계에 쓰는 (이전, 이후) 가격: 그 집의 최저 호가 변화 (예전 기록은 매물 호가 변화)."""
     return (c.get("stat_old_won") or c.get("old_price_won"), c.get("stat_new_won") or c.get("price_won"))
+
+
+COMPOSITION_NOTES = {"최저가 중개사 빠짐": "빠짐", "더 싼 중개사 추가": "추가"}
+
+
+def move_text(c: dict, old: str | None = None, new: str | None = None, broker: str | None = None,
+              note: str | None = None) -> str:
+    """가격 변동 문구. 중개사 구성 변화는 그 중개사가 가격을 바꾼 것처럼 읽히지 않게
+    'OO공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만' 으로 쓴다."""
+    old = old if old is not None else c.get("old_price")
+    new = new if new is not None else c.get("price")
+    broker = broker if broker is not None else c.get("broker", "")
+    note = note if note is not None else c.get("note", "")
+    if note in COMPOSITION_NOTES:
+        return f"{broker or '중개사'} {COMPOSITION_NOTES[note]} · 최저가 {old} → {new}"
+    return f"{broker + ' ' if broker else ''}{old} → {new}"
+
+
+def note_text(c: dict) -> str:
+    """변동 뒤에 괄호로 붙일 설명 (구성 변화는 문구에 이미 들어 있어 뺀다)."""
+    fol = follow_text(c)
+    return "" if fol in COMPOSITION_NOTES else fol
 
 
 def change_counts(changes: list[dict]) -> str:
@@ -1569,12 +1592,11 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             items = []
             for c in r["changes"]:
                 d = change_diff(c)
-                who = f"{c['broker']} " if c.get("broker") else ""
-                fol = follow_text(c)
-                text += [f"  - [{c['trade']}] {who}{c['old_price']} → {c['price']} ({d})"
+                fol = note_text(c)
+                text += [f"  - [{c['trade']}] {move_text(c)} ({d})"
                          + (f" [{fol}]" if fol else "") + f" · {where_text(c)}{seen_at(c)}",
                          f"    {article_url(c)}"]
-                items.append(link(article_url(c), f"[{c['trade']}] {who}{c['old_price']} → {c['price']}")
+                items.append(link(article_url(c), f"[{c['trade']}] {move_text(c)}")
                              + diff_html(d)
                              + (f' <span style="color:#5f6368">({esc(fol)})</span>' if fol else "")
                              + f" · {esc(where_text(c) + seen_at(c))}")
@@ -1616,9 +1638,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 a = e["item"]
                 text.append(f"  - {when} [{kind}] {event_text(e)}")
                 if e["kind"] == "change":
-                    fol = follow_text(a)
-                    who = f"{a['broker']} " if a.get("broker") else ""
-                    body = (link(article_url(a), f"[{a.get('trade')}] {who}{a.get('old_price')} → {a.get('price')}")
+                    fol = note_text(a)
+                    body = (link(article_url(a), f"[{a.get('trade')}] {move_text(a)}")
                             + diff_html(change_diff(a))
                             + (f' <span style="color:#5f6368">({esc(fol)})</span>' if fol else "")
                             + f" · {esc(where_text(a))}")
