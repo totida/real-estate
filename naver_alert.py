@@ -723,12 +723,15 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
             for no, old_won, new_won in moved:
                 old_txt, new_txt = won_text(old_won), won_text(new_won)
                 updated[no] = when
+                # 같은 집의 다른 중개사가 이미 그 가격이었으면 '뒤따라' 바꾼 것 (통계에서 뺀다)
+                follow = new_won in {w for k, w in old_members.items() if k != no}
                 t["price_history"] = [*t.get("price_history", before.get("price_history", [])),
-                                      [when, new_txt, new_won, old_txt, old_won, brokers.get(no, "")]][-10:]
+                                      [when, new_txt, new_won, old_txt, old_won, brokers.get(no, ""),
+                                       follow]][-10:]
                 if changes is not None:
                     changes.append(dict(t, articleNo=no, price=new_txt, price_won=new_won,
                                         old_price=old_txt, old_price_won=old_won, old_rent_won=None,
-                                        rent_won=None, broker=brokers.get(no, "")))
+                                        rent_won=None, broker=brokers.get(no, ""), follow=follow))
             t["member_updated"] = updated
             t["member_brokers"] = {no: b for no, b in brokers.items() if no in new_members}
             firsts = dict(before.get("member_first") or {})
@@ -1134,7 +1137,7 @@ def parse_time(iso: str | None) -> datetime | None:
 
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
-              "realtor_count", "broker", "member_prices",
+              "realtor_count", "broker", "member_prices", "follow",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
               "first_price", "gone_date", "desc", "realtor")
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
@@ -1165,7 +1168,10 @@ def recent_events(state: dict, complex_no: str, now: datetime, days: int = 7) ->
 def event_text(e: dict) -> str:
     a = e["item"]
     if e["kind"] == "change":
-        return f"[{a.get('trade')}] {a.get('old_price')} → {a.get('price')} ({change_diff(a)}) · {where_text(a)}"
+        fol = follow_text(a)
+        who = f"{a['broker']} " if a.get("broker") else ""
+        return (f"[{a.get('trade')}] {who}{a.get('old_price')} → {a.get('price')} ({change_diff(a)})"
+                + (f" [{fol}]" if fol else "") + f" · {where_text(a)}")
     if e["kind"] == "gone":
         days = days_between(a.get("first_seen"), a.get("gone_date"))
         parts = [f"[{a.get('trade')}] {a.get('price')}", where_text(a),
@@ -1188,7 +1194,8 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
         old_txt, old_won = (cur[3], cur[4]) if len(cur) > 4 else (prev[1], prev[2] if len(prev) > 2 else None)
         d = diff_text(old_won, cur[2] if len(cur) > 2 else None)
         who = f"{cur[5]} " if len(cur) > 5 and cur[5] else ""
-        out.append(f"{stamp_label(cur[0])} {who}{old_txt} → {cur[1]}" + (f" {d}" if d else ""))
+        fol = " (뒤따라)" if len(cur) > 6 and cur[6] else ""
+        out.append(f"{stamp_label(cur[0])} {who}{old_txt} → {cur[1]}" + (f" {d}" if d else "") + fol)
     return out
 
 
@@ -1198,24 +1205,38 @@ def seen_at(a: dict) -> str:
     return f" · {time_label(at)} 확인" if at else ""
 
 
+def follow_text(c: dict) -> str:
+    """다른 중개사가 이미 부르던 가격으로 맞춘 변동이면 '뒤따라 내림/올림'."""
+    if not c.get("follow"):
+        return ""
+    return "뒤따라 " + ("올림" if (c.get("price_won") or 0) > (c.get("old_price_won") or 0) else "내림")
+
+
 def change_counts(changes: list[dict]) -> str:
-    """요약표용: '▲1 ▼2' (변동 없으면 '0')."""
+    """요약표용: '▲1 ▼2' (변동 없으면 '0'). 뒤따라 바꾼 것은 뺀다."""
+    changes = [c for c in changes if not c.get("follow")]
     up = sum(1 for c in changes if (c.get("price_won") or 0) > (c.get("old_price_won") or 0))
     down = len(changes) - up
     return " ".join(x for x in (f"▲{up}" if up else "", f"▼{down}" if down else "") if x) or "0"
 
 
 def change_stats(changes: list[dict]) -> str:
-    """'상승 2 · 하락 3 · 평균 ▼1,200만 (-1.8%)' — 상승·하락을 합친 평균 변동."""
+    """'상승 2 · 하락 3 · 평균 ▼1,200만 (-1.8%)' — 상승·하락을 합친 평균 변동.
+
+    다른 중개사가 이미 부르던 가격으로 뒤따라 바꾼 것은 집값 흐름이 아니라 빼고 '(뒤따라 N건 제외)' 로 적는다.
+    """
+    follows = sum(1 for c in changes if c.get("follow"))
+    changes = [c for c in changes if not c.get("follow")]
     diffs = [(c["price_won"] - c["old_price_won"], c["old_price_won"]) for c in changes
              if c.get("price_won") and c.get("old_price_won") and c["price_won"] != c["old_price_won"]]
+    tail = f" (뒤따라 {follows}건 제외)" if follows else ""
     if not diffs:
-        return ""
+        return f"상승 0 · 하락 0{tail}" if follows else ""
     up = sum(1 for d, _ in diffs if d > 0)
     avg = sum(d for d, _ in diffs) / len(diffs)
     pct = sum(d / base * 100 for d, base in diffs) / len(diffs)
     avg_txt = f"{'▲' if avg > 0 else '▼'}{won_text(round(abs(avg)))} ({pct:+.1f}%)" if round(avg) else "0"
-    return f"상승 {up} · 하락 {len(diffs) - up} · 평균 {avg_txt}"
+    return f"상승 {up} · 하락 {len(diffs) - up} · 평균 {avg_txt}{tail}"
 
 
 def format_briefing(reports: list[dict], label: str, now: datetime,
@@ -1318,10 +1339,14 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             for c in r["changes"]:
                 d = change_diff(c)
                 who = f"{c['broker']} " if c.get("broker") else ""
-                text += [f"  - [{c['trade']}] {who}{c['old_price']} → {c['price']} ({d}) · {where_text(c)}{seen_at(c)}",
+                fol = follow_text(c)
+                text += [f"  - [{c['trade']}] {who}{c['old_price']} → {c['price']} ({d})"
+                         + (f" [{fol}]" if fol else "") + f" · {where_text(c)}{seen_at(c)}",
                          f"    {article_url(c)}"]
                 items.append(link(article_url(c), f"[{c['trade']}] {who}{c['old_price']} → {c['price']}")
-                             + diff_html(d) + f" · {esc(where_text(c) + seen_at(c))}")
+                             + diff_html(d)
+                             + (f' <span style="color:#5f6368">({esc(fol)})</span>' if fol else "")
+                             + f" · {esc(where_text(c) + seen_at(c))}")
             stats = change_stats(r["changes"])
             section(f"💰 이번 가격 변동 {len(r['changes'])}건" + (f" · {stats}" if stats else ""), items)
         if r.get("gone"):
@@ -1360,8 +1385,12 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 a = e["item"]
                 text.append(f"  - {when} [{kind}] {event_text(e)}")
                 if e["kind"] == "change":
-                    body = (link(article_url(a), f"[{a.get('trade')}] {a.get('old_price')} → {a.get('price')}")
-                            + diff_html(change_diff(a)) + f" · {esc(where_text(a))}")
+                    fol = follow_text(a)
+                    who = f"{a['broker']} " if a.get("broker") else ""
+                    body = (link(article_url(a), f"[{a.get('trade')}] {who}{a.get('old_price')} → {a.get('price')}")
+                            + diff_html(change_diff(a))
+                            + (f' <span style="color:#5f6368">({esc(fol)})</span>' if fol else "")
+                            + f" · {esc(where_text(a))}")
                 elif e["kind"] == "gone":
                     body = esc(event_text(e))
                 else:

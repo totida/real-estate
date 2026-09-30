@@ -65,7 +65,7 @@ class DiffTest(unittest.TestCase):
         c = changes[0]
         self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
         self.assertEqual(na.change_diff(c), "▼5,000만")
-        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000, ""])
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000, "", False])
         # 같은 가격이면 변동 없음
         na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)
@@ -140,6 +140,32 @@ class DiffTest(unittest.TestCase):
         self.assertEqual([c["broker"] for c in ch], ["A부동산", "B부동산"])
         self.assertEqual(na.dup_text(info), "중개사 3곳 · 5억 8,000만~6억 2,000만")
         self.assertEqual(na.recent_price_changes(info, 1), ["10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만"])
+
+    def test_follow_along_excluded_from_stats(self):
+        # 모두 6억 → 10/02 A 5억8천 → 10/03 B도 5억8천: B는 '뒤따라 내림', 통계에서 제외
+        def grp(p):
+            return {"articleNo": "1", "aliases": ["2", "3"], "complexNo": "1", "trade": "매매",
+                    "price": na.won_text(p["1"]), "price_won": p["1"], "member_prices": p,
+                    "member_brokers": {"1": "C공인", "2": "A부동산", "3": "B부동산"}}
+        state, day2, day3 = {}, [], []
+        na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 600_000_000, "3": 600_000_000})],
+                          "2026-10-01", stamp="2026-10-01T10:00+09:00")
+        na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 580_000_000, "3": 600_000_000})],
+                          "2026-10-02", changes=day2, stamp="2026-10-02T10:00+09:00")
+        g = grp({"1": 600_000_000, "2": 580_000_000, "3": 580_000_000})
+        na.track_listings(state, "1", [g], "2026-10-03", changes=day3, stamp="2026-10-03T10:00+09:00")
+        self.assertFalse(day2[0]["follow"])
+        self.assertTrue(day3[0]["follow"])
+        self.assertEqual(na.follow_text(day3[0]), "뒤따라 내림")
+        self.assertEqual(na.change_stats(day2 + day3), "상승 0 · 하락 1 · 평균 ▼2,000만 (-3.3%) (뒤따라 1건 제외)")
+        self.assertEqual(na.change_counts(day2 + day3), "▼1")
+        self.assertEqual(na.change_stats(day3), "상승 0 · 하락 0 (뒤따라 1건 제외)")
+        info = na.tracked_info(state, g)
+        self.assertEqual(na.recent_price_changes(info, 1)[0], "10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만 (뒤따라)")
+        r = {"no": "1", "name": "A", "status": "ok", "listings": [], "new": [], "changes": day3, "gone": []}
+        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, 10, tzinfo=na.KST))
+        self.assertIn("[뒤따라 내림]", text)
+        self.assertIn("(뒤따라 내림)", body)
 
     def test_change_stats(self):
         cs = [{"old_price_won": 600_000_000, "price_won": 620_000_000},
