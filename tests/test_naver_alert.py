@@ -1045,7 +1045,7 @@ class ReviewScenarioTest(unittest.TestCase):
 
 class ReviewScenario2Test(unittest.TestCase):
     """두 번째 검토에서 찾은 경우들."""
-    grp = ReviewScenarioTest.grp
+    grp = staticmethod(ReviewScenarioTest.grp)
     run_days = ReviewScenarioTest.run_days
 
     def one(self, no, price, broker="가공인", **kw):
