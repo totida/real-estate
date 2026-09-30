@@ -606,6 +606,30 @@ class BriefingTest(unittest.TestCase):
         self.assertEqual(rows[0]["가격(만원)"], "62000")
         self.assertEqual(rows[0]["처음대비(만원)"], "-1000")
         self.assertEqual(rows[0]["링크"], "https://fin.land.naver.com/articles/1")
+        b = dict(a, member_prices={"1": 620_000_000, "7": 615_000_000},
+                 member_brokers={"1": "OO공인", "7": "XX부동산"})
+        rows = list(_csv.DictReader(na.listings_csv([{"name": "A", "listings": [b]}]).decode("utf-8-sig").splitlines()))
+        self.assertEqual(rows[0]["중개사 수"], "2")
+        self.assertEqual((rows[0]["최저호가(만원)"], rows[0]["최고호가(만원)"]), ("61500", "62000"))
+        self.assertEqual(rows[0]["중개사별 호가"], "XX부동산 6억 1,500만 / OO공인 6억 2,000만")
+
+    def test_normalize_fin_member_brokers(self):
+        item = {"representativeArticleInfo": {"articleNumber": 1, "priceInfo": {"dealPrice": 620_000_000},
+                                              "brokerInfo": {"brokerageName": "OO공인"}},
+                "duplicatedArticleInfo": {"realtorCount": 2, "articleInfoList": [
+                    {"articleNumber": 7, "priceInfo": {"dealPrice": 615_000_000},
+                     "brokerInfo": {"brokerageName": "XX부동산"}}]}}
+        a = na.normalize_fin(item, "9")
+        self.assertEqual(a["member_prices"], {"1": 620_000_000, "7": 615_000_000})
+        self.assertEqual(a["member_brokers"], {"1": "OO공인", "7": "XX부동산"})
+        self.assertEqual(a["realtor_count"], 2)
+        self.assertEqual(na.dup_text(a), "중개사 2곳")
+        self.assertIn("중개사 2곳", na.where_text(a))
+        r = {"no": "9", "name": "A", "status": "ok", "new": [], "changes": [], "gone": [],
+             "listings": [dict(a, trade="매매", price="6억 2,000만")]}
+        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))
+        self.assertIn("중개사 2곳</span>", body)
+        self.assertEqual(na.dup_text(dict(a, realtor_count=1, member_prices={})), "")
 
     def test_html_escaped(self):
         r = {"no": "1", "name": "<b>단지</b>", "status": "failed", "error": "<script>"}

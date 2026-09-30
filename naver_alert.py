@@ -512,12 +512,17 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
     dong = str(a.get("dongName") or "")
     price = a.get("priceInfo") or {}
     # 같은 집을 올린 중개사별 매물번호 → 호가 (가격 변동은 같은 매물번호끼리 비교)
-    members = {}
+    members, brokers = {}, {}
     for m in [a, *(dup.get("articleInfoList") or [])]:
+        if not m.get("articleNumber"):
+            continue
         pi = m.get("priceInfo") or {}
         won = won_int(pi.get("dealPrice") or pi.get("warrantyPrice") or pi.get("depositPrice"))
-        if m.get("articleNumber") and won:
+        if won:
             members[str(m["articleNumber"])] = won
+        name = (m.get("brokerInfo") or {}).get("brokerageName")
+        if name:
+            brokers[str(m["articleNumber"])] = name
     return {
         "articleNo": no,
         "aliases": aliases,
@@ -529,6 +534,8 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
                              or price.get("depositPrice")),
         "rent_won": won_int(price.get("rentPrice")),
         "member_prices": members,
+        "member_brokers": brokers,
+        "realtor_count": max(count, len(members), 1),
         "building": dong + "동" if dong.isdigit() else dong,
         "floor": detail.get("floorInfo", ""),
         "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
@@ -647,7 +654,7 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
     return new
 
 
-TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "building",
+TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "realtor_count", "building",
               "floor", "area", "supply", "exclusive", "realtor")
 
 
@@ -889,11 +896,17 @@ def change_diff(c: dict) -> str:
     return f"월세 {d}" if d else ""
 
 
+def dup_text(a: dict) -> str:
+    """여러 중개사가 같은 집을 올렸으면 '중개사 3곳'."""
+    n = a.get("realtor_count") or len(a.get("member_prices") or {})
+    return f"중개사 {n}곳" if n and n > 1 else ""
+
+
 def where_text(a: dict) -> str:
     p = pyeong_of(a)
     size = f"{p}평" if p else a.get("area", "")
     place = " ".join(x for x in (a.get("building", ""), floor_text(a.get("floor", ""))) if x)
-    return " · ".join(x for x in (place, size) if x)
+    return " · ".join(x for x in (place, size, dup_text(a)) if x)
 
 
 def trade_summary(listings: list[dict]) -> str:
@@ -958,7 +971,15 @@ def sale_rows(r: dict) -> list[dict]:
 
 
 LISTING_CSV_FIELDS = ["단지", "가격(만원)", "가격", "동", "층", "층(정렬용)", "평", "공급㎡", "전용㎡",
-                      "처음가격", "처음대비(만원)", "처음본날", "최근변동", "중개사", "특징", "링크"]
+                      "처음가격", "처음대비(만원)", "처음본날", "최근변동", "중개사", "중개사 수",
+                      "최저호가(만원)", "최고호가(만원)", "중개사별 호가", "특징", "링크"]
+
+
+def broker_prices(a: dict) -> list[tuple[str, int, str]]:
+    """같은 집을 올린 중개사별 (중개사, 호가, 매물번호), 싼 순."""
+    brokers = a.get("member_brokers") or {}
+    out = [(brokers.get(no, f"매물 {no}"), won, no) for no, won in (a.get("member_prices") or {}).items()]
+    return sorted(out, key=lambda x: x[1])
 
 
 def listings_csv(reports: list[dict]) -> bytes:
@@ -972,12 +993,16 @@ def listings_csv(reports: list[dict]) -> bytes:
             first = a.get("first_price_won")
             diff = (a["price_won"] - first) // 10_000 if first and a.get("price_won") else ""
             hist = recent_price_changes(a, 1)
+            bp = broker_prices(a)
             w.writerow([r["name"], (a.get("price_won") or 0) // 10_000 or "", a.get("price", ""),
                         a.get("building", ""), a.get("floor", ""), round(floor_num(a), 1),
                         pyeong_of(a) or "", a.get("supply") or "", a.get("exclusive") or "",
                         a.get("first_price", ""), diff, a.get("first_seen", ""),
-                        hist[0] if hist else "", a.get("realtor", ""), a.get("desc", ""),
-                        article_url(a)])
+                        hist[0] if hist else "", a.get("realtor", ""),
+                        max(a.get("realtor_count") or 0, len(bp), 1),
+                        bp[0][1] // 10_000 if bp else "", bp[-1][1] // 10_000 if bp else "",
+                        " / ".join(f"{name} {won_text(won)}" for name, won, _ in bp),
+                        a.get("desc", ""), article_url(a)])
     return buf.getvalue().encode("utf-8-sig")  # 엑셀에서 한글이 깨지지 않게 BOM
 
 
@@ -1001,6 +1026,7 @@ def parse_time(iso: str | None) -> datetime | None:
 
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
+              "realtor_count",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
               "first_price", "gone_date", "desc", "realtor")
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
@@ -1252,14 +1278,17 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 place = " ".join(x for x in (a.get("building", ""), a.get("floor", "")) if x)
                 place += "층" if a.get("floor") else ""
                 p = pyeong_of(a)
-                text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else ""))
+                text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else "")
+                            + (f" · {dup_text(a)}" if dup_text(a) else ""))
                 hist = recent_price_changes(a, 6)  # 최근 1개 + 펼치면 이전 5개
                 text += [f"      ↳ {x}" for x in hist[:1]]
                 if len(hist) > 1:
                     text.append(f"      (이전 변동 {len(hist) - 1}건)")
                     text += [f"        {x}" for x in hist[1:]]
                 h.append(f'<tr style="border-top:1px solid #eee">'
-                         f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}</td>'
+                         f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}'
+                         + (f'<br><span style="font-size:11px;color:#b06000">{esc(dup_text(a))}</span>'
+                            if dup_text(a) else "") + '</td>'
                          f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
                          f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
                          f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
