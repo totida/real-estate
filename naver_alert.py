@@ -553,6 +553,8 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
         "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
         "supply": to_float(space.get("supplySpace")),
         "exclusive": to_float(space.get("exclusiveSpace")),
+        # 같은 면적 안의 평면 타입 (네이버 spaceInfo.nameType, 예: A/B)
+        "unit_type": str(space.get("nameType") or "").strip(),
         "direction": detail.get("direction", ""),
         "desc": detail.get("articleFeatureDescription") or "",
         "realtor": realtor,
@@ -667,7 +669,7 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
 
 TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "realtor_count", "building",
-              "floor", "area", "supply", "exclusive", "realtor", "link_no", "direction")
+              "floor", "area", "supply", "exclusive", "realtor", "link_no", "direction", "unit_type")
 
 
 def _pair_relisted(old_members: dict, new_members: dict, old_brokers: dict, new_brokers: dict,
@@ -1081,6 +1083,8 @@ def check_brokers(complex_no: str | None = None) -> int:
     finally:
         naver.close()
     items = result.get("list") or []
+    types = sorted({(normalize_fin(i, no)["unit_type"] or "없음", normalize_fin(i, no)["area"]) for i in items})
+    print("타입(nameType) 값: " + ", ".join(f"{t} ({ar})" for t, ar in types[:10]))
     groups = [i for i in items if ((i.get("duplicatedArticleInfo") or {}).get("realtorCount") or 1) > 1]
     print(f"{complexes.get(no, no)} ({no}) 첫 페이지 매물 {len(items)}건 중 여러 중개사 매물 {len(groups)}건")
     ok = 0
@@ -1089,6 +1093,7 @@ def check_brokers(complex_no: str | None = None) -> int:
         members = dup.get("articleInfoList") or []
         a = normalize_fin(i, no)
         print(f"- 대표 {a['articleNo']} {a['price']} · 중개사 {dup.get('realtorCount')}곳 · 목록 {len(members)}건")
+        print(f"  타입(nameType): {a['unit_type'] or '없음'} · 면적 {a['area']}")
         if members:
             m = members[0]
             print(f"  다른 중개사 매물 항목: {sorted(m.keys())}")
@@ -1232,9 +1237,16 @@ def dup_text(a: dict) -> str:
     return f"중개사 {n}곳{rng}"
 
 
+def type_text(a: dict) -> str:
+    """평면 타입 표시: 'A' → 'A타입' (값이 이미 '타입' 으로 끝나면 그대로)."""
+    t = a.get("unit_type") or ""
+    return t if not t or t.endswith("타입") else f"{t}타입"
+
+
 def where_text(a: dict) -> str:
     p = pyeong_of(a)
     size = f"{p}평" if p else a.get("area", "")
+    size = " ".join(x for x in (size, type_text(a)) if x)
     place = " ".join(x for x in (a.get("building", ""), floor_text(a.get("floor", ""))) if x)
     return " · ".join(x for x in (place, size, dup_text(a)) if x)
 
@@ -1300,7 +1312,7 @@ def sale_rows(r: dict) -> list[dict]:
     return sort_listings([a for a in r.get("listings", []) if a["trade"] == "매매"])
 
 
-LISTING_CSV_FIELDS = ["단지", "가격(만원)", "가격", "동", "층", "층(정렬용)", "평", "공급㎡", "전용㎡",
+LISTING_CSV_FIELDS = ["단지", "가격(만원)", "가격", "동", "층", "층(정렬용)", "평", "타입", "공급㎡", "전용㎡",
                       "처음가격", "처음대비(만원)", "처음본날", "최근변동", "중개사", "중개사 수",
                       "최저호가(만원)", "최고호가(만원)", "중개사별 호가", "특징", "링크"]
 
@@ -1326,7 +1338,8 @@ def listings_csv(reports: list[dict]) -> bytes:
             bp = broker_prices(a)
             w.writerow([r["name"], (a.get("price_won") or 0) // 10_000 or "", a.get("price", ""),
                         a.get("building", ""), a.get("floor", ""), round(floor_num(a), 1),
-                        pyeong_of(a) or "", a.get("supply") or "", a.get("exclusive") or "",
+                        pyeong_of(a) or "", a.get("unit_type") or "", a.get("supply") or "",
+                        a.get("exclusive") or "",
                         a.get("first_price", ""), diff, a.get("first_seen", ""),
                         hist[0] if hist else "", a.get("realtor", ""),
                         max(a.get("realtor_count") or 0, len(bp), 1),
@@ -1356,7 +1369,7 @@ def parse_time(iso: str | None) -> datetime | None:
 
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
-              "realtor_count", "broker", "member_prices", "follow", "note", "counts", "link_no",
+              "realtor_count", "broker", "member_prices", "follow", "note", "counts", "link_no", "unit_type",
               "stat_old_won", "stat_new_won",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
               "first_price", "gone_date", "desc", "realtor")
@@ -1672,7 +1685,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                 place = " ".join(x for x in (a.get("building", ""), a.get("floor", "")) if x)
                 place += "층" if a.get("floor") else ""
                 p = pyeong_of(a)
-                text.append(f"  - {a['price']} · {place} · {p or ''}평" + (f" · 처음 대비 {d}" if d else "")
+                text.append(f"  - {a['price']} · {place} · {p or ''}평"
+                            + (f" {type_text(a)}" if type_text(a) else "") + (f" · 처음 대비 {d}" if d else "")
                             + (f" · {dup_text(a)}" if dup_text(a) else ""))
                 hist = recent_price_changes(a, 6)  # 최근 1개 + 펼치면 이전 5개
                 text += [f"      ↳ {x}" for x in hist[:1]]
@@ -1683,7 +1697,9 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                          f'<td><span style="white-space:nowrap">{link(article_url(a), a["price"])}</span>'
                          + (f'<br><span style="font-size:11px;color:#b06000">{esc(dup_text(a))}</span>'
                             if dup_text(a) else "") + '</td>'
-                         f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
+                         f"<td>{esc(place)}</td><td align=\"center\">{p or ''}"
+                         + (f'<br><span style="font-size:11px;color:#5f6368">{esc(a.get("unit_type"))}</span>'
+                            if a.get("unit_type") else "") + "</td>"
                          f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
                          f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
                 if hist:

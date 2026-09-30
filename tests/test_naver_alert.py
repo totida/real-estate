@@ -1155,3 +1155,23 @@ class CompositionWordingTest(unittest.TestCase):
                 ["2026-10-02", "5억 3,000만", 530_000_000, "5억 1,000만", 510_000_000, "양정공인", "최저가 중개사 빠짐"]]
         self.assertEqual(na.recent_price_changes({"price_history": hist}),
                          ["10/02 양정공인 빠짐 · 최저가 5억 1,000만 → 5억 3,000만 ▲2,000만"])
+
+
+class UnitTypeTest(unittest.TestCase):
+    def test_unit_type_shown(self):
+        item = {"representativeArticleInfo": {"articleNumber": 1, "priceInfo": {"dealPrice": 600_000_000},
+                                              "spaceInfo": {"supplySpace": 86.23, "exclusiveSpace": 59.78,
+                                                            "nameType": "A"}}}
+        a = na.normalize_fin(item, "9")
+        self.assertEqual(a["unit_type"], "A")
+        self.assertIn("26평 A타입", na.where_text(a))
+        self.assertEqual(na.type_text({"unit_type": "59B타입"}), "59B타입")
+        self.assertEqual(na.type_text({}), "")
+        r = {"no": "9", "name": "X", "status": "ok", "new": [], "changes": [], "gone": [],
+             "listings": [dict(a, trade="매매")]}
+        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))
+        self.assertIn("26평 A타입", text)
+        self.assertIn(">A</span>", body)
+        import csv as _csv
+        rows = list(_csv.DictReader(na.listings_csv([r]).decode("utf-8-sig").splitlines()))
+        self.assertEqual(rows[0]["타입"], "A")
