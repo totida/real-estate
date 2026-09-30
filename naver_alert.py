@@ -667,7 +667,7 @@ def diff_and_update(state: dict, articles: list[dict], now: datetime,
 
 
 TRACK_KEYS = ("complexNo", "name", "trade", "price", "price_won", "rent_won", "realtor_count", "building",
-              "floor", "area", "supply", "exclusive", "realtor", "link_no")
+              "floor", "area", "supply", "exclusive", "realtor", "link_no", "direction")
 
 
 def _pair_relisted(old_members: dict, new_members: dict, old_brokers: dict, new_brokers: dict,
@@ -744,11 +744,13 @@ def _price_moves(key: str, before: dict, cur: dict, old_members: dict, new_membe
     return moves, min_event, stat_owner, old_min, new_min
 
 
-def _merge_tracked(into: dict, other: dict) -> None:
+def _merge_tracked(into: dict, other: dict, other_key: str | None = None) -> None:
     """같은 집으로 합쳐진 두 추적 기록을 하나로 (처음 본 날은 빠른 쪽, 중개사 호가는 합침).
 
     update 전에 부르므로, 원래 있던 중개사가 '더 싼 중개사 추가' 로 잘못 보이지 않는다.
     """
+    if not other.get("member_prices") and other.get("price_won"):  # 중개사별 호가가 없던 기록
+        other = dict(other, member_prices={other.get("rep") or other_key: other["price_won"]})
     if (other.get("first_seen") or "9") < (into.get("first_seen") or "9"):
         for k in ("first_seen", "first_price", "first_price_won"):
             into[k] = other.get(k)
@@ -757,8 +759,8 @@ def _merge_tracked(into: dict, other: dict) -> None:
             into["first_price"], into["first_price_won"] = other.get("first_price"), other["first_price_won"]
     for k in ("member_prices", "member_brokers", "member_first"):
         into[k] = {**(other.get(k) or {}), **(into.get(k) or {})}
-    into["aliases"] = sorted(set(into.get("aliases", [])) | set(other.get("aliases", []))
-                             | {other.get("rep")} - {None})
+    into["aliases"] = sorted((set(into.get("aliases", [])) | set(other.get("aliases", []))
+                              | {other.get("rep"), other_key}) - {None})
     # 가격 이력은 변동 항목만 합친다 (처음 본 날 항목끼리 섞이면 가짜 변동처럼 보임)
     hist = into.get("price_history", [])[:1] + sorted(
         [h for h in into.get("price_history", []) + other.get("price_history", []) if len(h) > 3],
@@ -864,7 +866,7 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         if cur is None:
             continue
         if id(cur) in owner_of:  # 따로 추적하던 두 기록이 한 집으로 합쳐짐
-            _merge_tracked(tracked[owner_of[id(cur)]], t)
+            _merge_tracked(tracked[owner_of[id(cur)]], t, key)
             del tracked[key]
             continue
         owner_of[id(cur)] = key
@@ -889,7 +891,9 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         """
         if t.get("trade") != a.get("trade") or not str(t.get("floor") or "").split("/")[0].isdigit():
             return False
-        if len(t.get("member_prices") or {}) > 1 or (a.get("realtor_count") or 1) > 1:
+        # 양쪽 모두 중개사 한 곳짜리 (가격을 모르는 중개사까지 세는 realtor_count 로도 확인)
+        if (len(t.get("member_prices") or {}) > 1 or (t.get("realtor_count") or 1) > 1
+                or (a.get("realtor_count") or 1) > 1):
             return False
         tb = set((t.get("member_brokers") or {}).values())
         ab = set((a.get("member_brokers") or {}).values())
@@ -897,52 +901,61 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         return (bool(tb) and tb == ab and t.get("building") == a.get("building")
                 and t.get("floor") == a.get("floor") and t.get("supply") == a.get("supply")
                 and t.get("exclusive") == a.get("exclusive")
+                # 같은 층 같은 평형의 다른 호수와 헷갈리지 않게 향도 같아야 함
+                and (t.get("direction") or "") == (a.get("direction") or "")
                 and bool(old and new) and abs(new - old) <= old * 0.1)
 
-    def unique(cands: list):
-        return cands[0] if len(cands) == 1 else None
+    def resume(key: str, a: dict, from_gone: bool, same_id: bool) -> None:
+        """사라졌거나 안 보이던 기록을 새로 올라온 매물 a 로 이어간다."""
+        t = recent_gone.pop(key) if from_gone else tracked.pop(key)
+        t.pop("gone_date", None)
+        tracked[key] = t
+        owner_of[id(a)] = key
+        if relisted is not None:
+            relisted.add(a["articleNo"])
+        old_min = min((t.get("member_prices") or {}).values(), default=t.get("price_won"))
+        new_members = a.get("member_prices") or ({a["articleNo"]: a["price_won"]} if a.get("price_won") else {})
+        new_min = min(new_members.values(), default=a.get("price_won"))
+        # 매물번호별 비교는 하지 않고(새 번호일 수 있음) 아래에서 최저가로 한 번만 비교
+        t["member_prices"], t["price_won"] = {}, None
+        update(key, t, a)
+        if old_min and new_min and old_min != new_min:
+            # 같은 번호로 다시 나타나면 '다시 올라옴'(통계 제외), 같은 중개사가 새 번호로 올리면 '재등록'(통계에 셈)
+            note = "다시 올라옴" if same_id else "재등록"
+            brokers = t.get("member_brokers") or {}
+            no = min((w, n) for n, w in new_members.items())[1]
+            old_txt, new_txt = won_text(old_min), won_text(new_min)
+            t["price_history"] = [*t.get("price_history", []),
+                                  [when, new_txt, new_min, old_txt, old_min, brokers.get(no, ""), note]][-10:]
+            emit(t, articleNo=no, link_no=no, price=new_txt, price_won=new_min, old_price=old_txt,
+                 old_price_won=old_min, broker=brokers.get(no, ""), note=note,
+                 counts=not same_id, follow=False,
+                 stat_old_won=None if same_id else old_min, stat_new_won=None if same_id else new_min)
 
+    # 1) 사라졌던 집이 같은 번호로 다시 나타남
+    fresh_articles = []
     for a in articles:
         ids = {a["articleNo"], *a.get("aliases", [])}
         if id(a) in owner_of or any(i in tracked for i in ids):
             continue
-        # 사라졌다 다시 올라온 집 / 안 보이던 집을 새 번호로 다시 올린 경우 → 기록을 이어간다
         back = next((k for k, g in recent_gone.items() if g["complexNo"] == complex_no
                      and ids & {k, g.get("rep"), *g.get("aliases", [])}), None)
-        relist = None
-        if back is None:
-            # 후보가 딱 하나일 때만 잇는다 (같은 중개사가 비슷한 집을 여러 채 올린 경우 오판 방지)
-            relist = unique([k for k, t in tracked.items() if t["complexNo"] == complex_no
-                             and t.get("missed") and same_house(t, a)])
-            if relist is None:
-                back = unique([k for k, g in recent_gone.items() if g["complexNo"] == complex_no
-                               and same_house(g, a)])
-        if back is not None or relist is not None:
-            key = back if back is not None else relist
-            t = recent_gone.pop(key) if back is not None else tracked.pop(key)
-            t.pop("gone_date", None)
-            tracked[key] = t
-            owner_of[id(a)] = key
-            if relisted is not None:
-                relisted.add(a["articleNo"])
-            old_min = min((t.get("member_prices") or {}).values(), default=t.get("price_won"))
-            new_members = a.get("member_prices") or ({a["articleNo"]: a["price_won"]} if a.get("price_won") else {})
-            new_min = min(new_members.values(), default=a.get("price_won"))
-            # 매물번호별 비교는 하지 않고(새 번호일 수 있음) 아래에서 최저가로 한 번만 비교
-            t["member_prices"], t["price_won"] = {}, None
-            update(key, t, a)
-            if old_min and new_min and old_min != new_min:
-                note = "다시 올라옴" if back is not None else "재등록"
-                brokers = t.get("member_brokers") or {}
-                no = min((w, n) for n, w in new_members.items())[1]
-                old_txt, new_txt = won_text(old_min), won_text(new_min)
-                t["price_history"] = [*t.get("price_history", []),
-                                      [when, new_txt, new_min, old_txt, old_min, brokers.get(no, ""), note]][-10:]
-                emit(t, articleNo=no, link_no=no, price=new_txt, price_won=new_min, old_price=old_txt,
-                     old_price_won=old_min, broker=brokers.get(no, ""), note=note,
-                     counts=back is None, follow=False,
-                     stat_old_won=old_min if back is None else None,
-                     stat_new_won=new_min if back is None else None)
+        if back is not None:
+            resume(back, a, from_gone=True, same_id=True)
+        else:
+            fresh_articles.append(a)
+    # 2) 같은 중개사가 같은 집을 새 번호로 다시 올림: 새 매물과 옛 기록이 서로 딱 하나씩 맞을 때만 잇는다
+    olds = [(k, t, False) for k, t in tracked.items() if t["complexNo"] == complex_no and t.get("missed")]
+    olds += [(k, g, True) for k, g in recent_gone.items() if g["complexNo"] == complex_no]
+    cands = {id(a): [(k, g) for k, t, g in olds if same_house(t, a)] for a in fresh_articles}
+    per_old: dict = {}
+    for a in fresh_articles:
+        for k, _ in cands[id(a)]:
+            per_old[k] = per_old.get(k, 0) + 1
+    for a in fresh_articles:
+        c = cands[id(a)]
+        if len(c) == 1 and per_old[c[0][0]] == 1:
+            resume(c[0][0], a, from_gone=c[0][1], same_id=False)
             continue
         if not wanted(a):
             continue

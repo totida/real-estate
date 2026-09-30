@@ -1085,3 +1085,47 @@ class ReviewScenario2Test(unittest.TestCase):
         self.assertEqual(out[1][0], [])
         (t,) = state["tracked"].values()
         self.assertEqual([h for h in t["price_history"] if len(h) > 3], [])
+
+
+class ReviewScenario3Test(unittest.TestCase):
+    """세 번째 검토에서 찾은 경우들."""
+    grp = staticmethod(ReviewScenarioTest.grp)
+    run_days = ReviewScenarioTest.run_days
+    one = ReviewScenario2Test.one
+
+    def test_1_two_new_listings_one_old_record(self):
+        _, out = self.run_days([[self.one("X", 6.0)], [], [self.one("T1", 6.0), self.one("T2", 6.05)]])
+        self.assertEqual(out[2][2], set())             # 둘 다 신규 (어느 쪽도 X 에 붙이지 않음)
+        self.assertEqual([g["articleNo"] for g in out[2][1]], ["X"])
+
+    def test_2_ambiguous_across_tracked_and_gone(self):
+        state, out = self.run_days([[self.one("R", 6.0)], [], [], [self.one("T1", 6.2), self.one("T2", 6.2)],
+                                    [self.one("Y", 6.3)]])
+        self.assertEqual(out[4][2], set())             # R(사라짐)·T1·T2(안 보임) 후보가 여럿이면 잇지 않음
+
+    def test_3_direction_must_match(self):
+        _, out = self.run_days([[self.one("A", 6.0, direction="남향")], [self.one("B", 6.1, direction="동향")]])
+        self.assertEqual(out[1][2], set())
+        _, out = self.run_days([[self.one("A", 6.0, direction="남향")], [self.one("B", 6.1, direction="남향")]])
+        self.assertEqual(out[1][2], {"B"})
+
+    def test_4_old_record_multi_broker_by_count(self):
+        x = self.one("X", 6.0)
+        x["realtor_count"] = 2                          # 가격 아는 중개사는 한 곳이지만 실제로는 두 곳
+        _, out = self.run_days([[x], [self.one("Y", 5.9)]])
+        self.assertEqual(out[1][2], set())
+
+    def test_5_relist_after_gone_is_counted(self):
+        _, out = self.run_days([[self.one("X", 6.0)], [], [], [self.one("Y", 5.9)]])
+        self.assertEqual([(c["note"], c["counts"]) for c in out[3][0]], [("재등록", True)])
+
+    def test_6_merge_record_without_member_prices(self):
+        state = {"tracked": {
+            "X": {"complexNo": "1", "rep": "X", "aliases": [], "price_won": 600_000_000, "missed": 0,
+                  "member_prices": {"X": 600_000_000}, "first_seen": "2026-10-01"},
+            "Y": {"complexNo": "1", "rep": "Y", "aliases": [], "price_won": 580_000_000, "missed": 0,
+                  "first_seen": "2026-10-01"}}}
+        ch = []
+        na.track_listings(state, "1", [self.grp({"X": 6.0, "Y": 5.8})], "2026-10-02", changes=ch)
+        self.assertEqual(ch, [])                        # 가짜 '더 싼 중개사 추가' 없음
+        self.assertEqual(len(state["tracked"]), 1)
