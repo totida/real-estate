@@ -65,7 +65,7 @@ class DiffTest(unittest.TestCase):
         c = changes[0]
         self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
         self.assertEqual(na.change_diff(c), "▼5,000만")
-        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000, "", False])
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000, "", ""])
         # 같은 가격이면 변동 없음
         na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)
@@ -120,8 +120,7 @@ class DiffTest(unittest.TestCase):
             na.track_listings(state, "1", [grp(day2)], "2026-10-02", changes=ch)
             self.assertEqual([(c["articleNo"], c["old_price"], c["price"]) for c in ch], want, name)
 
-    def test_recent_broker_shown(self):
-        # 모두 6억 → 10/02 A 6억2천 올림 → 10/03 B 5억8천 내림: 표에는 가장 최근인 B 가격
+    def test_lowest_price_shown_and_min_based_stats(self):
         def grp(prices):
             return {"articleNo": "1", "aliases": ["2", "3"], "complexNo": "1", "trade": "매매",
                     "price": na.won_text(prices["1"]), "price_won": prices["1"], "member_prices": prices,
@@ -129,43 +128,47 @@ class DiffTest(unittest.TestCase):
         state, ch = {}, []
         na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 600_000_000, "3": 600_000_000})],
                           "2026-10-01", changes=ch, stamp="2026-10-01T10:00+09:00")
+        # 10/02 A 6억2천으로 올림: 최저가(6억) 그대로 → 목록엔 있지만 통계 제외
         g = grp({"1": 600_000_000, "2": 620_000_000, "3": 600_000_000})
         na.track_listings(state, "1", [g], "2026-10-02", changes=ch, stamp="2026-10-02T10:00+09:00")
-        self.assertEqual(na.tracked_info(state, g)["price"], "6억 2,000만")
+        self.assertEqual(na.tracked_info(state, g)["price"], "6억")
+        self.assertEqual((ch[0]["broker"], na.follow_text(ch[0]), na.counted(ch[0])), ("A부동산", "최저가 그대로", False))
+        # 10/03 B 5억8천으로 내림: 최저가 6억 → 5억8천 → 통계에 하락 1
         g = grp({"1": 600_000_000, "2": 620_000_000, "3": 580_000_000})
         na.track_listings(state, "1", [g], "2026-10-03", changes=ch, stamp="2026-10-03T10:00+09:00")
         info = na.tracked_info(state, g)
         self.assertEqual((info["price"], info["articleNo"]), ("5억 8,000만", "3"))
         self.assertEqual(na.diff_text(info["first_price_won"], info["price_won"]), "▼2,000만")
-        self.assertEqual([c["broker"] for c in ch], ["A부동산", "B부동산"])
+        self.assertTrue(na.counted(ch[1]))
+        self.assertEqual(na.change_stats(ch), "상승 0 · 하락 1 · 평균 ▼2,000만 (-3.3%) (최저가 안 바뀐 1건 제외)")
         self.assertEqual(na.dup_text(info), "중개사 3곳 · 5억 8,000만~6억 2,000만")
         self.assertEqual(na.recent_price_changes(info, 1), ["10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만"])
 
-    def test_follow_along_excluded_from_stats(self):
-        # 모두 6억 → 10/02 A 5억8천 → 10/03 B도 5억8천: B는 '뒤따라 내림', 통계에서 제외
+    def test_second_cut_above_lowest(self):
+        # 모두 6억 → 10/02 A 5억8천 → 10/03 B 5억9천: 표는 최저 5억8천 유지, B 변동은 통계 제외
         def grp(p):
             return {"articleNo": "1", "aliases": ["2", "3"], "complexNo": "1", "trade": "매매",
                     "price": na.won_text(p["1"]), "price_won": p["1"], "member_prices": p,
                     "member_brokers": {"1": "C공인", "2": "A부동산", "3": "B부동산"}}
-        state, day2, day3 = {}, [], []
-        na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 600_000_000, "3": 600_000_000})],
-                          "2026-10-01", stamp="2026-10-01T10:00+09:00")
-        na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 580_000_000, "3": 600_000_000})],
-                          "2026-10-02", changes=day2, stamp="2026-10-02T10:00+09:00")
-        g = grp({"1": 600_000_000, "2": 580_000_000, "3": 580_000_000})
-        na.track_listings(state, "1", [g], "2026-10-03", changes=day3, stamp="2026-10-03T10:00+09:00")
-        self.assertFalse(day2[0]["follow"])
-        self.assertTrue(day3[0]["follow"])
-        self.assertEqual(na.follow_text(day3[0]), "뒤따라 내림")
-        self.assertEqual(na.change_stats(day2 + day3), "상승 0 · 하락 1 · 평균 ▼2,000만 (-3.3%) (뒤따라 1건 제외)")
-        self.assertEqual(na.change_counts(day2 + day3), "▼1")
-        self.assertEqual(na.change_stats(day3), "상승 0 · 하락 0 (뒤따라 1건 제외)")
+        state, ch = {}, []
+        for d, p in [("01", {"1": 600_000_000, "2": 600_000_000, "3": 600_000_000}),
+                     ("02", {"1": 600_000_000, "2": 580_000_000, "3": 600_000_000}),
+                     ("03", {"1": 600_000_000, "2": 580_000_000, "3": 590_000_000})]:
+            g = grp(p)
+            na.track_listings(state, "1", [g], f"2026-10-{d}", changes=ch, stamp=f"2026-10-{d}T10:00+09:00")
         info = na.tracked_info(state, g)
-        self.assertEqual(na.recent_price_changes(info, 1)[0], "10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만 (뒤따라)")
-        r = {"no": "1", "name": "A", "status": "ok", "listings": [], "new": [], "changes": day3, "gone": []}
-        _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, 10, tzinfo=na.KST))
-        self.assertIn("[뒤따라 내림]", text)
-        self.assertIn("(뒤따라 내림)", body)
+        self.assertEqual(info["price"], "5억 8,000만")
+        self.assertEqual(na.diff_text(info["first_price_won"], info["price_won"]), "▼2,000만")
+        self.assertEqual([na.counted(c) for c in ch], [True, False])
+        self.assertEqual(na.follow_text(ch[1]), "최저가 그대로")
+        self.assertEqual(na.change_counts(ch), "▼1")
+        # 최저가를 부르던 중개사가 올리면 최저가가 오른 만큼 상승으로 센다
+        state2, ch2 = {}, []
+        for d, p in [("01", {"1": 600_000_000, "2": 580_000_000}), ("02", {"1": 600_000_000, "2": 590_000_000})]:
+            g = {"articleNo": "1", "aliases": ["2"], "complexNo": "1", "trade": "매매", "price": "x",
+                 "price_won": p["1"], "member_prices": p}
+            na.track_listings(state2, "1", [g], f"2026-10-{d}", changes=ch2)
+        self.assertEqual(na.change_stats(ch2), "상승 1 · 하락 0 · 평균 ▲1,000만 (+1.7%)")
 
     def test_change_stats(self):
         cs = [{"old_price_won": 600_000_000, "price_won": 620_000_000},

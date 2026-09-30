@@ -720,18 +720,34 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                 for no in new_members:
                     if no not in old_members and no not in old_ids:
                         updated[no] = when
+            # 통계는 그 집의 최저 호가가 실제로 바뀐 경우만 센다 (한 집당 한 번, 최저가 변화 폭으로)
+            old_min = min(old_members.values()) if old_members else None
+            new_min = min(new_members.values()) if new_members else None
+            stat_owner = None
+            if moved and old_min and new_min and old_min != new_min:
+                # 최저가를 만든(내린) 중개사, 최저가가 올랐으면 원래 최저가였던 중개사의 변동에 붙인다
+                owner = [m for m in moved if m[2] == new_min] or [m for m in moved if m[1] == old_min] or moved
+                stat_owner = owner[0][0]
             for no, old_won, new_won in moved:
                 old_txt, new_txt = won_text(old_won), won_text(new_won)
                 updated[no] = when
-                # 같은 집의 다른 중개사가 이미 그 가격이었으면 '뒤따라' 바꾼 것 (통계에서 뺀다)
-                follow = new_won in {w for k, w in old_members.items() if k != no}
+                counts = no == stat_owner
+                if counts:
+                    note = ""
+                elif new_won in {w for k, w in old_members.items() if k != no}:
+                    note = "뒤따라 " + ("올림" if new_won > old_won else "내림")
+                else:
+                    note = "최저가 그대로"
                 t["price_history"] = [*t.get("price_history", before.get("price_history", [])),
                                       [when, new_txt, new_won, old_txt, old_won, brokers.get(no, ""),
-                                       follow]][-10:]
+                                       note]][-10:]
                 if changes is not None:
                     changes.append(dict(t, articleNo=no, price=new_txt, price_won=new_won,
                                         old_price=old_txt, old_price_won=old_won, old_rent_won=None,
-                                        rent_won=None, broker=brokers.get(no, ""), follow=follow))
+                                        rent_won=None, broker=brokers.get(no, ""), note=note,
+                                        counts=counts, follow=note.startswith("뒤따라"),
+                                        stat_old_won=old_min if counts else None,
+                                        stat_new_won=new_min if counts else None))
             t["member_updated"] = updated
             t["member_brokers"] = {no: b for no, b in brokers.items() if no in new_members}
             firsts = dict(before.get("member_first") or {})
@@ -762,8 +778,10 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                                        aliases=a.get("aliases", []), rep=a["articleNo"],
                                        member_prices=members, member_first=dict(members),
                                        member_brokers=dict(a.get("member_brokers") or {}),
-                                       first_seen=today, first_price=a.get("price"),
-                                       first_price_won=a.get("price_won"),
+                                       first_seen=today,
+                                       # 처음 대비는 처음 봤을 때 그 집의 최저 호가와 비교
+                                       first_price=won_text(min(members.values())) if members else a.get("price"),
+                                       first_price_won=min(members.values()) if members else a.get("price_won"),
                                        price_history=[[today, a.get("price"), a.get("price_won")]],
                                        last_seen=today, missed=0)
     return gone
@@ -1137,7 +1155,8 @@ def parse_time(iso: str | None) -> datetime | None:
 
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
-              "realtor_count", "broker", "member_prices", "follow",
+              "realtor_count", "broker", "member_prices", "follow", "note", "counts",
+              "stat_old_won", "stat_new_won",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
               "first_price", "gone_date", "desc", "realtor")
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
@@ -1194,7 +1213,8 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
         old_txt, old_won = (cur[3], cur[4]) if len(cur) > 4 else (prev[1], prev[2] if len(prev) > 2 else None)
         d = diff_text(old_won, cur[2] if len(cur) > 2 else None)
         who = f"{cur[5]} " if len(cur) > 5 and cur[5] else ""
-        fol = " (뒤따라)" if len(cur) > 6 and cur[6] else ""
+        note = cur[6] if len(cur) > 6 else ""
+        fol = f" ({'뒤따라' if note is True else note})" if note else ""
         out.append(f"{stamp_label(cur[0])} {who}{old_txt} → {cur[1]}" + (f" {d}" if d else "") + fol)
     return out
 
@@ -1206,16 +1226,30 @@ def seen_at(a: dict) -> str:
 
 
 def follow_text(c: dict) -> str:
-    """다른 중개사가 이미 부르던 가격으로 맞춘 변동이면 '뒤따라 내림/올림'."""
+    """통계에서 빠진 변동의 이유: '뒤따라 내림/올림' 또는 '최저가 그대로'."""
+    if c.get("note"):
+        return c["note"]
     if not c.get("follow"):
         return ""
     return "뒤따라 " + ("올림" if (c.get("price_won") or 0) > (c.get("old_price_won") or 0) else "내림")
 
 
+def counted(c: dict) -> bool:
+    """상승·하락 통계에 넣는 변동인지 (그 집의 최저 호가가 바뀐 변동만)."""
+    if "counts" in c:
+        return bool(c["counts"])
+    return not c.get("follow")  # 예전 기록
+
+
+def stat_pair(c: dict) -> tuple:
+    """통계에 쓰는 (이전, 이후) 가격: 그 집의 최저 호가 변화 (예전 기록은 매물 호가 변화)."""
+    return (c.get("stat_old_won") or c.get("old_price_won"), c.get("stat_new_won") or c.get("price_won"))
+
+
 def change_counts(changes: list[dict]) -> str:
-    """요약표용: '▲1 ▼2' (변동 없으면 '0'). 뒤따라 바꾼 것은 뺀다."""
-    changes = [c for c in changes if not c.get("follow")]
-    up = sum(1 for c in changes if (c.get("price_won") or 0) > (c.get("old_price_won") or 0))
+    """요약표용: '▲1 ▼2' (변동 없으면 '0'). 최저 호가가 바뀐 변동만 센다."""
+    changes = [stat_pair(c) for c in changes if counted(c)]
+    up = sum(1 for old, new in changes if (new or 0) > (old or 0))
     down = len(changes) - up
     return " ".join(x for x in (f"▲{up}" if up else "", f"▼{down}" if down else "") if x) or "0"
 
@@ -1225,11 +1259,10 @@ def change_stats(changes: list[dict]) -> str:
 
     다른 중개사가 이미 부르던 가격으로 뒤따라 바꾼 것은 집값 흐름이 아니라 빼고 '(뒤따라 N건 제외)' 로 적는다.
     """
-    follows = sum(1 for c in changes if c.get("follow"))
-    changes = [c for c in changes if not c.get("follow")]
-    diffs = [(c["price_won"] - c["old_price_won"], c["old_price_won"]) for c in changes
-             if c.get("price_won") and c.get("old_price_won") and c["price_won"] != c["old_price_won"]]
-    tail = f" (뒤따라 {follows}건 제외)" if follows else ""
+    follows = sum(1 for c in changes if not counted(c))
+    pairs = [stat_pair(c) for c in changes if counted(c)]
+    diffs = [(new - old, old) for old, new in pairs if old and new and old != new]
+    tail = f" (최저가 안 바뀐 {follows}건 제외)" if follows else ""
     if not diffs:
         return f"상승 0 · 하락 0{tail}" if follows else ""
     up = sum(1 for d, _ in diffs if d > 0)
@@ -1490,13 +1523,12 @@ def tracked_info(state: dict, a: dict) -> dict:
             out = dict(a, first_seen=t.get("first_seen"),
                        first_price=won_text(first_won) if first_won else t.get("first_price"),
                        first_price_won=first_won, price_history=t.get("price_history", []))
-            # 여러 중개사면 가장 최근에 호가를 바꾸거나 새로 올린 중개사 가격을 보여준다
+            # 여러 중개사면 그 집의 최저 호가를 보여준다 (링크도 그 중개사 매물로)
             prices = a.get("member_prices") or {}
-            recent = [(at, no) for no, at in (t.get("member_updated") or {}).items() if prices.get(no)]
-            if recent:
-                _, no = max(recent)
-                out.update(articleNo=no, price_won=prices[no], price=won_text(prices[no]),
-                           recent_broker=(a.get("member_brokers") or {}).get(no, ""))
+            if prices:
+                won, no = min((w, n) for n, w in prices.items())
+                out.update(articleNo=no, price_won=won, price=won_text(won),
+                           low_broker=(a.get("member_brokers") or {}).get(no, ""))
             return out
     return a
 
