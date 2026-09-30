@@ -96,7 +96,7 @@ class DiffTest(unittest.TestCase):
         self.assertEqual((c["articleNo"], c["old_price"], c["price"]), ("1", "8억", "7억 8,000만"))
         # 표에는 그 집의 최저 호가(1번 7억8천), 처음 대비는 처음 봤을 때 최저 호가(7억9천)와 비교
         info = na.tracked_info(state, g2)
-        self.assertEqual((info["articleNo"], info["price"]), ("1", "7억 8,000만"))
+        self.assertEqual((info["link_no"], info["price"]), ("1", "7억 8,000만"))
         self.assertEqual(info["first_price_won"], 790_000_000)
         self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
 
@@ -137,7 +137,8 @@ class DiffTest(unittest.TestCase):
         g = grp({"1": 600_000_000, "2": 620_000_000, "3": 580_000_000})
         na.track_listings(state, "1", [g], "2026-10-03", changes=ch, stamp="2026-10-03T10:00+09:00")
         info = na.tracked_info(state, g)
-        self.assertEqual((info["price"], info["articleNo"]), ("5억 8,000만", "3"))
+        self.assertEqual((info["price"], info["link_no"]), ("5억 8,000만", "3"))
+        self.assertIn("articles/3", na.article_url(info))
         self.assertEqual(na.diff_text(info["first_price_won"], info["price_won"]), "▼2,000만")
         self.assertTrue(na.counted(ch[1]))
         self.assertEqual(na.change_stats(ch), "상승 0 · 하락 1 · 평균 ▼2,000만 (-3.3%) (최저가 안 바뀐 1건 제외)")
@@ -916,3 +917,126 @@ class ChromiumIntegrationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewScenarioTest(unittest.TestCase):
+    """검토에서 찾은 경우들 (가격 단위: 억)."""
+
+    @staticmethod
+    def grp(prices, brokers=None, rep=None, **kw):
+        prices = {k: int(v * 100_000_000) for k, v in prices.items()}
+        rep = rep or next(iter(prices))
+        low = min(prices.values())
+        return dict({"articleNo": rep, "aliases": [k for k in prices if k != rep], "complexNo": "1",
+                     "trade": "매매", "price": na.won_text(low), "price_won": low, "member_prices": prices,
+                     "member_brokers": brokers or {k: f"중개{k}" for k in prices},
+                     "building": "101동", "floor": "10/30", "supply": 83.0, "exclusive": 59.0}, **kw)
+
+    def run_days(self, days, wanted=lambda a: True):
+        state, out = {}, []
+        for i, g in enumerate(days, 1):
+            ch, relisted = [], set()
+            gone = na.track_listings(state, "1", g, f"2026-10-{i:02d}", wanted, ch,
+                                     stamp=f"2026-10-{i:02d}T10:00+09:00", relisted=relisted)
+            out.append((ch, gone, relisted))
+        return state, out
+
+    def test_1_cut_not_counted_as_rise_when_cheapest_leaves(self):
+        _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"B": 5.9})]])
+        ch = out[1][0]
+        self.assertEqual([(c["broker"], c["note"], c["counts"]) for c in ch],
+                         [("중개B", "통계 제외", False), ("중개B", "최저가 중개사 빠짐", False)])
+        self.assertEqual(na.change_counts(ch), "0")
+        self.assertEqual(na.change_stats(ch), "상승 0 · 하락 0 (최저가 안 바뀐 2건 제외)")
+
+    def test_2_composition_changes_recorded(self):
+        _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"B": 6.0})]])
+        c = out[1][0]
+        self.assertEqual([(x["note"], x["old_price"], x["price"], x["counts"]) for x in c],
+                         [("최저가 중개사 빠짐", "5억 8,000만", "6억", False)])
+        _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"A": 5.8, "B": 6.0, "C": 5.6})]])
+        self.assertEqual([(x["note"], x["broker"], x["price"]) for x in out[1][0]],
+                         [("더 싼 중개사 추가", "중개C", "5억 6,000만")])
+
+    def test_3_no_pairing_across_brokers(self):
+        _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"A": 5.8, "C": 5.7})]])
+        self.assertEqual([(x["note"], x["broker"], x["old_price"]) for x in out[1][0]],
+                         [("더 싼 중개사 추가", "중개C", "5억 8,000만")])
+        # 같은 중개사가 새 번호로 다시 올리면 짝지어 가격 변동(최저가 바뀌면 통계에 셈)
+        b = {"A": "가공인", "B": "나공인", "B2": "나공인"}
+        _, out = self.run_days([[self.grp({"A": 6.0, "B": 5.9}, b)], [self.grp({"A": 6.0, "B2": 5.7}, b)]])
+        self.assertEqual([(x["note"], x["old_price"], x["price"], x["counts"]) for x in out[1][0]],
+                         [("재등록", "5억 9,000만", "5억 7,000만", True)])
+
+    def test_4_prices_are_lowest(self):
+        item = {"representativeArticleInfo": {"articleNumber": 1, "priceInfo": {"dealPrice": 600_000_000},
+                                              "brokerInfo": {"brokerageName": "대표공인"}},
+                "duplicatedArticleInfo": {"realtorCount": 2, "articleInfoList": [
+                    {"articleNumber": 7, "priceInfo": {"dealPrice": 580_000_000},
+                     "brokerInfo": {"brokerageName": "싼공인"}}]}}
+        a = na.normalize_fin(item, "9")
+        self.assertEqual((a["articleNo"], a["price"], a["link_no"], a["realtor"]),
+                         ("1", "5억 8,000만", "7", "싼공인 외 1곳"))
+        self.assertIn("articles/7", na.article_url(a))
+        # 사라짐 줄도 최저가
+        _, out = self.run_days([[self.grp({"A": 6.0, "B": 5.8})], [], []])
+        self.assertEqual(out[2][1][0]["price"], "5억 8,000만")
+
+    def test_5_merged_groups_not_double_counted(self):
+        g1, g2 = self.grp({"X": 6.0}), self.grp({"Y": 6.0})
+        merged = self.grp({"X": 6.0, "Y": 5.8})
+        state, out = self.run_days([[g1, g2], [merged]])
+        self.assertEqual(len(state["tracked"]), 1)
+        self.assertEqual([x["broker"] for x in out[1][0]], ["중개Y"])
+
+    def test_6_split_group_tracks_disappearance(self):
+        state, out = self.run_days([[self.grp({"X": 6.0, "Y": 6.0})], [self.grp({"X": 6.0}), self.grp({"Y": 6.0})]])
+        self.assertEqual(state["tracked"]["X"]["aliases"], [])  # 갈라지면 묶음 정보도 교체
+        self.assertIn("Y", state["tracked"])
+        for d in ("03", "04"):
+            gone = na.track_listings(state, "1", [self.grp({"Y": 6.0})], f"2026-10-{d}")
+        self.assertEqual([g["articleNo"] for g in gone], ["X"])  # X 가 팔리면 사라짐으로 잡힘
+
+    def test_7_filtered_out_not_reported(self):
+        big = lambda p: self.grp({"Z": p}, supply=112.0, exclusive=84.0)  # noqa: E731
+        want = lambda a: na.matches_pyeong(a, [25])  # noqa: E731
+        state, _ = self.run_days([[big(9.0)]], want)
+        self.assertNotIn("Z", state["tracked"])
+        # 조건을 좁히기 전부터 추적하던 매물: 변동·사라짐을 알리지 않음
+        state = {"tracked": {}}
+        na.track_listings(state, "1", [big(9.0)], "2026-10-01")
+        ch = []
+        na.track_listings(state, "1", [big(8.5)], "2026-10-02", want, ch)
+        self.assertEqual(ch, [])
+        for d in ("03", "04"):
+            gone = na.track_listings(state, "1", [], f"2026-10-{d}", want)
+        self.assertEqual(gone, [])
+
+    def test_8_reappear_and_relist(self):
+        g = self.grp({"A": 6.0})
+        state, out = self.run_days([[g], [], [], [self.grp({"A": 5.9})]])
+        self.assertEqual(len(out[2][1]), 1)                     # 3일째 사라짐
+        self.assertEqual(out[3][2], {"A"})                     # 4일째 다시 올라옴 → 신규 아님
+        self.assertEqual(state["tracked"]["A"]["first_seen"], "2026-10-01")
+        self.assertEqual([(x["note"], x["counts"]) for x in out[3][0]], [("다시 올라옴", False)])
+        # 중개사 한 곳이 같은 집을 새 번호로 다시 올림(끌어올리기) → 이어서 추적, 가격 변동으로
+        b1, b2 = {"A": "가공인"}, {"A2": "가공인"}
+        state, out = self.run_days([[self.grp({"A": 6.0}, b1)], [self.grp({"A2": 5.9}, b2)]])
+        self.assertEqual(out[1][2], {"A2"})
+        self.assertEqual([(x["note"], x["counts"], x["old_price"], x["price"]) for x in out[1][0]],
+                         [("재등록", True, "6억", "5억 9,000만")])
+        self.assertEqual(list(state["tracked"]), ["A"])
+
+    def test_9_legacy_first_price_fixed_to_min(self):
+        state = {"tracked": {"A": {"complexNo": "1", "rep": "A", "aliases": ["B"], "first_seen": "2026-09-29",
+                                   "first_price": "6억", "first_price_won": 600_000_000,
+                                   "member_prices": {"A": 600_000_000, "B": 580_000_000},
+                                   "member_first": {"A": 600_000_000, "B": 580_000_000}, "missed": 0}}}
+        g = self.grp({"A": 6.0, "B": 5.8})
+        na.track_listings(state, "1", [g], "2026-10-01")
+        info = na.tracked_info(state, g)
+        self.assertEqual(na.diff_text(info["first_price_won"], info["price_won"]), "")
+
+    def test_10_change_shows_current_range(self):
+        _, out = self.run_days([[self.grp({"A": 5.8, "B": 6.0})], [self.grp({"A": 5.7, "B": 6.0, "C": 6.2})]])
+        self.assertEqual(na.dup_text(out[1][0][0]), "중개사 3곳 · 5억 7,000만~6억 2,000만")
