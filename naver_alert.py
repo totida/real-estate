@@ -755,6 +755,7 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         tracked[a["articleNo"]] = dict({k: a.get(k) for k in TRACK_KEYS}, complexNo=complex_no,
                                        aliases=a.get("aliases", []), rep=a["articleNo"],
                                        member_prices=members, member_first=dict(members),
+                                       member_brokers=dict(a.get("member_brokers") or {}),
                                        first_seen=today, first_price=a.get("price"),
                                        first_price_won=a.get("price_won"),
                                        price_history=[[today, a.get("price"), a.get("price_won")]],
