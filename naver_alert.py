@@ -707,14 +707,27 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
                     if old_won != new_won:
                         moved.append((no, old_won, new_won))
             moved.sort(key=lambda m: m[0] != cur["articleNo"])  # 대표 매물 우선
+            brokers = {**(before.get("member_brokers") or {}), **(cur.get("member_brokers") or {})}
+            # 중개사 매물별로 마지막으로 호가를 바꾸거나 새로 올린 때 (표에 '최근 가격' 을 보여주는 기준)
+            updated = {no: at for no, at in (before.get("member_updated") or {}).items()
+                       if no in new_members}
+            when = stamp or today
+            if old_members:
+                old_ids = {key, before.get("rep", key), *before.get("aliases", [])}
+                for no in new_members:
+                    if no not in old_members and no not in old_ids:
+                        updated[no] = when
             for no, old_won, new_won in moved:
                 old_txt, new_txt = won_text(old_won), won_text(new_won)
+                updated[no] = when
                 t["price_history"] = [*t.get("price_history", before.get("price_history", [])),
-                                      [stamp or today, new_txt, new_won, old_txt, old_won]][-10:]
+                                      [when, new_txt, new_won, old_txt, old_won, brokers.get(no, "")]][-10:]
                 if changes is not None:
                     changes.append(dict(t, articleNo=no, price=new_txt, price_won=new_won,
                                         old_price=old_txt, old_price_won=old_won, old_rent_won=None,
-                                        rent_won=None))
+                                        rent_won=None, broker=brokers.get(no, "")))
+            t["member_updated"] = updated
+            t["member_brokers"] = {no: b for no, b in brokers.items() if no in new_members}
             firsts = dict(before.get("member_first") or {})
             if not firsts and before.get("first_price_won"):
                 firsts = {before.get("rep", key): before["first_price_won"]}
@@ -909,7 +922,11 @@ def change_diff(c: dict) -> str:
 def dup_text(a: dict) -> str:
     """여러 중개사가 같은 집을 올렸으면 '중개사 3곳'."""
     n = a.get("realtor_count") or len(a.get("member_prices") or {})
-    return f"중개사 {n}곳" if n and n > 1 else ""
+    if not n or n < 2:
+        return ""
+    wons = sorted(set((a.get("member_prices") or {}).values()))
+    rng = f" · {won_text(wons[0])}~{won_text(wons[-1])}" if len(wons) > 1 else ""
+    return f"중개사 {n}곳{rng}"
 
 
 def where_text(a: dict) -> str:
@@ -1036,7 +1053,7 @@ def parse_time(iso: str | None) -> datetime | None:
 
 
 EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price", "old_price_won",
-              "realtor_count",
+              "realtor_count", "broker", "member_prices",
               "old_rent_won", "building", "floor", "area", "supply", "exclusive", "first_seen",
               "first_price", "gone_date", "desc", "realtor")
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
@@ -1089,7 +1106,8 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
     for prev, cur in list(zip(hist, hist[1:]))[-n:][::-1]:
         old_txt, old_won = (cur[3], cur[4]) if len(cur) > 4 else (prev[1], prev[2] if len(prev) > 2 else None)
         d = diff_text(old_won, cur[2] if len(cur) > 2 else None)
-        out.append(f"{stamp_label(cur[0])} {old_txt} → {cur[1]}" + (f" {d}" if d else ""))
+        who = f"{cur[5]} " if len(cur) > 5 and cur[5] else ""
+        out.append(f"{stamp_label(cur[0])} {who}{old_txt} → {cur[1]}" + (f" {d}" if d else ""))
     return out
 
 
@@ -1218,9 +1236,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
             items = []
             for c in r["changes"]:
                 d = change_diff(c)
-                text += [f"  - [{c['trade']}] {c['old_price']} → {c['price']} ({d}) · {where_text(c)}{seen_at(c)}",
+                who = f"{c['broker']} " if c.get("broker") else ""
+                text += [f"  - [{c['trade']}] {who}{c['old_price']} → {c['price']} ({d}) · {where_text(c)}{seen_at(c)}",
                          f"    {article_url(c)}"]
-                items.append(link(article_url(c), f"[{c['trade']}] {c['old_price']} → {c['price']}")
+                items.append(link(article_url(c), f"[{c['trade']}] {who}{c['old_price']} → {c['price']}")
                              + diff_html(d) + f" · {esc(where_text(c) + seen_at(c))}")
             stats = change_stats(r["changes"])
             section(f"💰 이번 가격 변동 {len(r['changes'])}건" + (f" · {stats}" if stats else ""), items)
@@ -1296,7 +1315,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                     text.append(f"      (이전 변동 {len(hist) - 1}건)")
                     text += [f"        {x}" for x in hist[1:]]
                 h.append(f'<tr style="border-top:1px solid #eee">'
-                         f'<td style="white-space:nowrap">{link(article_url(a), a["price"])}'
+                         f'<td><span style="white-space:nowrap">{link(article_url(a), a["price"])}</span>'
                          + (f'<br><span style="font-size:11px;color:#b06000">{esc(dup_text(a))}</span>'
                             if dup_text(a) else "") + '</td>'
                          f"<td>{esc(place)}</td><td align=\"center\">{p or ''}</td>"
@@ -1357,11 +1376,18 @@ def tracked_info(state: dict, a: dict) -> dict:
     ids = {a["articleNo"], *a.get("aliases", [])}
     for key, t in (state.get("tracked") or {}).items():
         if ids & {key, t.get("rep"), *t.get("aliases", [])}:
-            first_won = (t.get("member_first") or {}).get(a["articleNo"]) or t.get("first_price_won")
-            return dict(a, first_seen=t.get("first_seen"),
-                        first_price=won_text(first_won) if first_won else t.get("first_price"),
-                        first_price_won=first_won,
-                        price_history=t.get("price_history", []))
+            first_won = t.get("first_price_won")
+            out = dict(a, first_seen=t.get("first_seen"),
+                       first_price=won_text(first_won) if first_won else t.get("first_price"),
+                       first_price_won=first_won, price_history=t.get("price_history", []))
+            # 여러 중개사면 가장 최근에 호가를 바꾸거나 새로 올린 중개사 가격을 보여준다
+            prices = a.get("member_prices") or {}
+            recent = [(at, no) for no, at in (t.get("member_updated") or {}).items() if prices.get(no)]
+            if recent:
+                _, no = max(recent)
+                out.update(articleNo=no, price_won=prices[no], price=won_text(prices[no]),
+                           recent_broker=(a.get("member_brokers") or {}).get(no, ""))
+            return out
     return a
 
 

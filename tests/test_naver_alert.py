@@ -65,7 +65,7 @@ class DiffTest(unittest.TestCase):
         c = changes[0]
         self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
         self.assertEqual(na.change_diff(c), "▼5,000만")
-        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000])
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000, ""])
         # 같은 가격이면 변동 없음
         na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)
@@ -94,9 +94,10 @@ class DiffTest(unittest.TestCase):
         self.assertEqual(len(changes), 1)
         c = changes[0]
         self.assertEqual((c["articleNo"], c["old_price"], c["price"]), ("1", "8억", "7억 8,000만"))
-        # 처음 대비는 같은 중개사(대표 2번) 처음 가격과 비교 → 변동 없음
+        # 표에는 가장 최근에 호가를 바꾼 중개사(1번) 가격, 처음 대비는 이 집을 처음 본 가격과 비교
         info = na.tracked_info(state, g2)
-        self.assertEqual(info["first_price_won"], 790_000_000)
+        self.assertEqual((info["articleNo"], info["price"]), ("1", "7억 8,000만"))
+        self.assertEqual(info["first_price_won"], 800_000_000)
         self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
 
     def test_broker_price_scenarios(self):
@@ -118,6 +119,27 @@ class DiffTest(unittest.TestCase):
             na.track_listings(state, "1", [grp(base)], "2026-10-01", changes=ch)
             na.track_listings(state, "1", [grp(day2)], "2026-10-02", changes=ch)
             self.assertEqual([(c["articleNo"], c["old_price"], c["price"]) for c in ch], want, name)
+
+    def test_recent_broker_shown(self):
+        # 모두 6억 → 10/02 A 6억2천 올림 → 10/03 B 5억8천 내림: 표에는 가장 최근인 B 가격
+        def grp(prices):
+            return {"articleNo": "1", "aliases": ["2", "3"], "complexNo": "1", "trade": "매매",
+                    "price": na.won_text(prices["1"]), "price_won": prices["1"], "member_prices": prices,
+                    "member_brokers": {"1": "C공인", "2": "A부동산", "3": "B부동산"}}
+        state, ch = {}, []
+        na.track_listings(state, "1", [grp({"1": 600_000_000, "2": 600_000_000, "3": 600_000_000})],
+                          "2026-10-01", changes=ch, stamp="2026-10-01T10:00+09:00")
+        g = grp({"1": 600_000_000, "2": 620_000_000, "3": 600_000_000})
+        na.track_listings(state, "1", [g], "2026-10-02", changes=ch, stamp="2026-10-02T10:00+09:00")
+        self.assertEqual(na.tracked_info(state, g)["price"], "6억 2,000만")
+        g = grp({"1": 600_000_000, "2": 620_000_000, "3": 580_000_000})
+        na.track_listings(state, "1", [g], "2026-10-03", changes=ch, stamp="2026-10-03T10:00+09:00")
+        info = na.tracked_info(state, g)
+        self.assertEqual((info["price"], info["articleNo"]), ("5억 8,000만", "3"))
+        self.assertEqual(na.diff_text(info["first_price_won"], info["price_won"]), "▼2,000만")
+        self.assertEqual([c["broker"] for c in ch], ["A부동산", "B부동산"])
+        self.assertEqual(na.dup_text(info), "중개사 3곳 · 5억 8,000만~6억 2,000만")
+        self.assertEqual(na.recent_price_changes(info, 1), ["10/03 오전 10시 B부동산 6억 → 5억 8,000만 ▼2,000만"])
 
     def test_change_stats(self):
         cs = [{"old_price_won": 600_000_000, "price_won": 620_000_000},
@@ -643,12 +665,12 @@ class BriefingTest(unittest.TestCase):
         self.assertEqual(a["member_prices"], {"1": 620_000_000, "7": 615_000_000})
         self.assertEqual(a["member_brokers"], {"1": "OO공인", "7": "XX부동산"})
         self.assertEqual(a["realtor_count"], 2)
-        self.assertEqual(na.dup_text(a), "중개사 2곳")
+        self.assertEqual(na.dup_text(a), "중개사 2곳 · 6억 1,500만~6억 2,000만")
         self.assertIn("중개사 2곳", na.where_text(a))
         r = {"no": "9", "name": "A", "status": "ok", "new": [], "changes": [], "gone": [],
              "listings": [dict(a, trade="매매", price="6억 2,000만")]}
         _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))
-        self.assertIn("중개사 2곳</span>", body)
+        self.assertIn("중개사 2곳 · 6억 1,500만~6억 2,000만</span>", body)
         self.assertEqual(na.dup_text(dict(a, realtor_count=1, member_prices={})), "")
 
     def test_html_escaped(self):
