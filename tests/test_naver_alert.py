@@ -65,7 +65,7 @@ class DiffTest(unittest.TestCase):
         c = changes[0]
         self.assertEqual((c["old_price"], c["price"]), ("8억", "7억 5,000만"))
         self.assertEqual(na.change_diff(c), "▼5,000만")
-        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000])
+        self.assertEqual(state["tracked"]["1"]["price_history"][-1], ["2026-09-29", "7억 5,000만", 750_000_000, "8억", 800_000_000])
         # 같은 가격이면 변동 없음
         na.track_listings(state, "1", [cut], "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)
@@ -81,6 +81,32 @@ class DiffTest(unittest.TestCase):
         na.track_listings(state, "1", [dict(art(2), aliases=["1"], price_won=770_000_000)],
                           "2026-09-30", changes=changes)
         self.assertEqual(len(changes), 1)  # 그 뒤 같은 중개사 매물의 변동은 잡는다
+
+    def test_member_price_change_when_representative_switches(self):
+        # 같은 집을 두 중개사가 올림: 1번 8억, 2번 7억 9천. 다음 날 대표가 2번으로 바뀌고 1번이 7억 8천으로 내림
+        state, changes = {}, []
+        g1 = dict(art(1), aliases=["2"], price_won=800_000_000,
+                  member_prices={"1": 800_000_000, "2": 790_000_000})
+        na.track_listings(state, "1", [g1], "2026-09-28", changes=changes)
+        g2 = dict(art(2), aliases=["1"], price="7억 9,000만", price_won=790_000_000,
+                  member_prices={"1": 780_000_000, "2": 790_000_000})
+        na.track_listings(state, "1", [g2], "2026-09-29", changes=changes)
+        self.assertEqual(len(changes), 1)
+        c = changes[0]
+        self.assertEqual((c["articleNo"], c["old_price"], c["price"]), ("1", "8억", "7억 8,000만"))
+        # 처음 대비는 같은 중개사(대표 2번) 처음 가격과 비교 → 변동 없음
+        info = na.tracked_info(state, g2)
+        self.assertEqual(info["first_price_won"], 790_000_000)
+        self.assertEqual(na.recent_price_changes(info), ["09/29 8억 → 7억 8,000만 ▼2,000만"])
+
+    def test_change_stats(self):
+        cs = [{"old_price_won": 600_000_000, "price_won": 620_000_000},
+              {"old_price_won": 500_000_000, "price_won": 480_000_000},
+              {"old_price_won": 400_000_000, "price_won": 390_000_000}]
+        self.assertEqual(na.change_stats(cs), "상승 1 · 하락 2 · 평균 ▼333만 (-1.1%)")
+        self.assertEqual(na.change_counts(cs), "▲1 ▼2")
+        self.assertEqual(na.change_counts([]), "0")
+        self.assertEqual(na.change_stats([]), "")
 
     def test_rent_only_change(self):
         c = {"old_price_won": 50_000_000, "price_won": 50_000_000,
@@ -484,6 +510,7 @@ class BriefingTest(unittest.TestCase):
         self.assertIn('href="https://fin.land.naver.com/articles/6"', body)  # 신규 매물 링크
         self.assertIn("8억 5,000만 → 8억", body)
         self.assertIn("▼5,000만", body)
+        self.assertIn("가격변동 1 (상승 0 · 하락 1 · 평균 ▼5,000만 (-5.9%))", body)
         self.assertIn("첫 조회", text)
         self.assertIn("조회 실패: 429", text)
 

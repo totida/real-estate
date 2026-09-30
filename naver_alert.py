@@ -434,7 +434,7 @@ class NaverLand:
         page = self._page()
         out: list[dict] = []
         last_info: list = []
-        seed = f"alert-{int(time.time())}"
+        seed = "naver-alert"  # 고정: 매번 바꾸면 순서·대표 매물이 달라져 변동 추적이 흔들린다
         for _ in range(50):
             payload = {
                 "size": 30, "complexNumber": complex_no, "tradeTypes": trade_types,
@@ -511,6 +511,13 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
     trade = a.get("tradeType", "")
     dong = str(a.get("dongName") or "")
     price = a.get("priceInfo") or {}
+    # 같은 집을 올린 중개사별 매물번호 → 호가 (가격 변동은 같은 매물번호끼리 비교)
+    members = {}
+    for m in [a, *(dup.get("articleInfoList") or [])]:
+        pi = m.get("priceInfo") or {}
+        won = won_int(pi.get("dealPrice") or pi.get("warrantyPrice") or pi.get("depositPrice"))
+        if m.get("articleNumber") and won:
+            members[str(m["articleNumber"])] = won
     return {
         "articleNo": no,
         "aliases": aliases,
@@ -521,6 +528,7 @@ def normalize_fin(item: dict, complex_no: str) -> dict:
         "price_won": won_int(price.get("dealPrice") or price.get("warrantyPrice")
                              or price.get("depositPrice")),
         "rent_won": won_int(price.get("rentPrice")),
+        "member_prices": members,
         "building": dong + "동" if dong.isdigit() else dong,
         "floor": detail.get("floorInfo", ""),
         "area": f"{space.get('supplySpace', '')}/{space.get('exclusiveSpace', '')}㎡",
@@ -671,15 +679,32 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
             matched_today.add(id(cur))
             before = dict(t)
             t.update({k: cur.get(k) for k in TRACK_KEYS}, complexNo=complex_no)
-            old, now_ = ((before.get("price_won"), before.get("rent_won")),
-                         (t.get("price_won"), t.get("rent_won")))
-            if (cur["articleNo"] == before.get("rep", key) and old[0] and now_[0]
-                    and old != now_):
+            old_members = dict(before.get("member_prices") or {})
+            if not old_members and before.get("price_won"):  # 예전 기록: 대표 매물 가격만 있음
+                old_members = {before.get("rep", key): before["price_won"]}
+            new_members = dict(cur.get("member_prices") or {})
+            if not new_members and cur.get("price_won"):
+                new_members = {cur["articleNo"]: cur["price_won"]}
+            # 같은 매물번호(같은 중개사 매물)의 호가가 바뀐 것만 가격 변동으로 본다
+            moved = [(no, old_members[no], won) for no, won in new_members.items()
+                     if old_members.get(no) and won and old_members[no] != won]
+            moved.sort(key=lambda m: m[0] != cur["articleNo"])  # 대표 매물 우선
+            if moved:
+                no, old_won, new_won = moved[0]
+                old_txt, new_txt = won_text(old_won), won_text(new_won)
                 t["price_history"] = [*before.get("price_history", []),
-                                      [stamp or today, t["price"], t.get("price_won")]][-10:]
+                                      [stamp or today, new_txt, new_won, old_txt, old_won]][-10:]
                 if changes is not None:
-                    changes.append(dict(t, articleNo=cur["articleNo"], old_price=before.get("price"),
-                                        old_price_won=old[0], old_rent_won=old[1]))
+                    changes.append(dict(t, articleNo=no, price=new_txt, price_won=new_won,
+                                        old_price=old_txt, old_price_won=old_won, old_rent_won=None,
+                                        rent_won=None))
+            firsts = dict(before.get("member_first") or {})
+            if not firsts and before.get("first_price_won"):
+                firsts = {before.get("rep", key): before["first_price_won"]}
+            for no, won in new_members.items():
+                firsts.setdefault(no, won)
+            t["member_first"] = firsts
+            t["member_prices"] = {**old_members, **new_members}
             t["rep"] = cur["articleNo"]
             t["aliases"] = sorted(set(t.get("aliases", [])) | {cur["articleNo"], *cur.get("aliases", [])}
                                   - {key})
@@ -695,8 +720,11 @@ def track_listings(state: dict, complex_no: str, articles: list[dict], today: st
         if (id(a) in matched_today or not wanted(a)
                 or any(i in tracked for i in (a["articleNo"], *a.get("aliases", [])))):
             continue
+        members = dict(a.get("member_prices") or {}) or (
+            {a["articleNo"]: a["price_won"]} if a.get("price_won") else {})
         tracked[a["articleNo"]] = dict({k: a.get(k) for k in TRACK_KEYS}, complexNo=complex_no,
                                        aliases=a.get("aliases", []), rep=a["articleNo"],
+                                       member_prices=members, member_first=dict(members),
                                        first_seen=today, first_price=a.get("price"),
                                        first_price_won=a.get("price_won"),
                                        price_history=[[today, a.get("price"), a.get("price_won")]],
@@ -753,6 +781,25 @@ def format_gone(gone: list[dict], complexes: dict, pyeongs: list[int] | None = N
                   if complexes.get(g["complexNo"], g.get("name", "")) == cname]
         sections.append("\n".join(lines))
     return title, "\n\n".join(sections)
+
+
+def print_status() -> int:
+    """기록이 잘 쌓이는지 확인용: 단지별 추적 매물 수·가격 이력·최근 7일 변동."""
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    state = load_state()
+    print(f"마지막 조회: {state.get('last_run', '-')} · 마지막 메일: {state.get('last_mail', '-')}")
+    tracked = state.get("tracked") or {}
+    now = datetime.now(KST)
+    for no, name in (config.get("complexes") or {}).items():
+        ts = [t for t in tracked.values() if t["complexNo"] == str(no)]
+        moved = sum(1 for t in ts if len(t.get("price_history") or []) > 1)
+        week = recent_events(state, str(no), now)
+        kinds = Counter(e["kind"] for e in week)
+        stats = change_stats([e["item"] for e in week if e["kind"] == "change"])
+        print(f"- {name}: 추적 {len(ts)}건 · 가격 바뀐 적 있는 매물 {moved}건 · 7일 변동 "
+              f"신규 {kinds['new']} / 가격 {kinds['change']} / 사라짐 {kinds['gone']}"
+              + (f" ({stats})" if stats else ""))
+    return 0
 
 
 def print_history(limit: int = 30, path: Path | None = None) -> int:
@@ -1004,8 +1051,9 @@ def recent_price_changes(a: dict, n: int = 2) -> list[str]:
     hist = a.get("price_history") or []
     out = []
     for prev, cur in list(zip(hist, hist[1:]))[-n:][::-1]:
-        d = diff_text(prev[2] if len(prev) > 2 else None, cur[2] if len(cur) > 2 else None)
-        out.append(f"{stamp_label(cur[0])} {prev[1]} → {cur[1]}" + (f" {d}" if d else ""))
+        old_txt, old_won = (cur[3], cur[4]) if len(cur) > 4 else (prev[1], prev[2] if len(prev) > 2 else None)
+        d = diff_text(old_won, cur[2] if len(cur) > 2 else None)
+        out.append(f"{stamp_label(cur[0])} {old_txt} → {cur[1]}" + (f" {d}" if d else ""))
     return out
 
 
@@ -1013,6 +1061,26 @@ def seen_at(a: dict) -> str:
     """메일 사이에 여러 번 조회했을 때, 그 변동을 확인한 시각."""
     at = parse_time(a.get("_at"))
     return f" · {time_label(at)} 확인" if at else ""
+
+
+def change_counts(changes: list[dict]) -> str:
+    """요약표용: '▲1 ▼2' (변동 없으면 '0')."""
+    up = sum(1 for c in changes if (c.get("price_won") or 0) > (c.get("old_price_won") or 0))
+    down = len(changes) - up
+    return " ".join(x for x in (f"▲{up}" if up else "", f"▼{down}" if down else "") if x) or "0"
+
+
+def change_stats(changes: list[dict]) -> str:
+    """'상승 2 · 하락 3 · 평균 ▼1,200만 (-1.8%)' — 상승·하락을 합친 평균 변동."""
+    diffs = [(c["price_won"] - c["old_price_won"], c["old_price_won"]) for c in changes
+             if c.get("price_won") and c.get("old_price_won") and c["price_won"] != c["old_price_won"]]
+    if not diffs:
+        return ""
+    up = sum(1 for d, _ in diffs if d > 0)
+    avg = sum(d for d, _ in diffs) / len(diffs)
+    pct = sum(d / base * 100 for d, base in diffs) / len(diffs)
+    avg_txt = f"{'▲' if avg > 0 else '▼'}{won_text(round(abs(avg)))} ({pct:+.1f}%)" if round(avg) else "0"
+    return f"상승 {up} · 하락 {len(diffs) - up} · 평균 {avg_txt}"
 
 
 def format_briefing(reports: list[dict], label: str, now: datetime,
@@ -1024,6 +1092,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     """
     ok = [r for r in reports if r["status"] != "failed"]
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
+    all_stats = change_stats([c for r in ok for c in r.get("changes", [])])
     day = time_label(now)  # 하루 여러 번 받아도 구분되게
     if since and not SHOW_TIME:
         window = f"{since:%m/%d} ~ {now:%m/%d}"
@@ -1053,7 +1122,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         f'<h2 style="font-size:19px;margin:0 0 4px">{esc(day)} 매물 브리핑</h2>',
         f'<div style="color:#5f6368;margin-bottom:12px">{esc(label)} · 이번 변동'
         + (f" ({esc(window)} 사이)" if window else "")
-        + f': 신규 {n_new} · 가격변동 {n_chg} · 사라짐 {n_gone}<br>'
+        + f': 신규 {n_new} · 가격변동 {n_chg}'
+        + (f" ({esc(all_stats)})" if all_stats else "") + f' · 사라짐 {n_gone}<br>'
         '단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다. 놓친 변동은 단지별 "최근 7일 변동"에 있습니다.</div>',
         '<table width="100%" cellpadding="6" style="border-collapse:collapse;font-size:13px;'
         'margin-bottom:8px;width:100%">',
@@ -1062,11 +1132,13 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     ]
     if window:
         text.insert(1, f"이번 변동: {window} 사이")
+    if all_stats:
+        text.insert(1, f"가격 변동: {all_stats}")
     for r in reports:
         week = str(len(r.get("week", [])))
         cells = (["조회 실패", "", "", "", week] if r["status"] == "failed" else
                  [str(len(r.get("listings", []))), str(len(r.get("new", []))),
-                  str(len(r.get("changes", []))), str(len(r.get("gone", []))), week])
+                  change_counts(r.get("changes", [])), str(len(r.get("gone", []))), week])
         h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}</td>'
                  + "".join(f'<td align="center" style="white-space:nowrap">{esc(c)}</td>'
                            for c in cells) + "</tr>")
@@ -1105,7 +1177,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                              + (f'<br><span style="color:#5f6368">{esc(extra)}</span>' if extra else ""))
             section(f"🆕 이번 신규 {len(r['new'])}건", items)
         if r.get("changes"):
-            text.append(f"  [가격 변동 {len(r['changes'])}건]")
+            text.append(f"  [가격 변동 {len(r['changes'])}건]"
+                        + (f" {change_stats(r['changes'])}" if change_stats(r["changes"]) else ""))
             items = []
             for c in r["changes"]:
                 d = change_diff(c)
@@ -1113,7 +1186,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                          f"    {article_url(c)}"]
                 items.append(link(article_url(c), f"[{c['trade']}] {c['old_price']} → {c['price']}")
                              + diff_html(d) + f" · {esc(where_text(c) + seen_at(c))}")
-            section(f"💰 이번 가격 변동 {len(r['changes'])}건", items)
+            stats = change_stats(r["changes"])
+            section(f"💰 이번 가격 변동 {len(r['changes'])}건" + (f" · {stats}" if stats else ""), items)
         if r.get("gone"):
             text.append(f"  [사라짐 {len(r['gone'])}건] 거래 완료 또는 중개사가 내림")
             items = []
@@ -1133,9 +1207,13 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         if week:
             note = ("날짜는 변동을 확인한 날, 그 전날 조회 이후 생긴 변동" if not SHOW_TIME else
                     "시각은 변동을 확인한 브리핑, 그 전 브리핑 이후 생긴 변동")
-            text.append(f"  [최근 7일 변동 {len(week)}건, 최신순 · {note}]")
+            wstats = change_stats([e["item"] for e in week if e["kind"] == "change"])
+            text.append(f"  [최근 7일 변동 {len(week)}건, 최신순 · {note}]"
+                        + (f" 가격 {wstats}" if wstats else ""))
             h.append(f'<div style="font-weight:600;margin:10px 0 2px">🗓 최근 7일 변동 {len(week)}건 '
                      f'<span style="font-weight:400;color:#5f6368">(최신순 · {note})</span></div>'
+                     + (f'<div style="font-size:13px;margin-bottom:2px">가격 {esc(wstats)}</div>'
+                        if wstats else "") +
                      '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:13px;'
                      'width:100%">')
             colors = {"new": "#188038", "change": "#b06000", "gone": "#5f6368"}
@@ -1240,8 +1318,10 @@ def tracked_info(state: dict, a: dict) -> dict:
     ids = {a["articleNo"], *a.get("aliases", [])}
     for key, t in (state.get("tracked") or {}).items():
         if ids & {key, t.get("rep"), *t.get("aliases", [])}:
-            return dict(a, first_seen=t.get("first_seen"), first_price=t.get("first_price"),
-                        first_price_won=t.get("first_price_won"),
+            first_won = (t.get("member_first") or {}).get(a["articleNo"]) or t.get("first_price_won")
+            return dict(a, first_seen=t.get("first_seen"),
+                        first_price=won_text(first_won) if first_won else t.get("first_price"),
+                        first_price_won=first_won,
                         price_history=t.get("price_history", []))
     return a
 
@@ -1267,6 +1347,8 @@ def resolve_complexes(naver: NaverLand, keyword: str, region: str) -> dict:
 def main() -> int:
     if sys.argv[1:2] == ["--history"]:
         return print_history(int(sys.argv[2]) if len(sys.argv) > 2 else 30)
+    if sys.argv[1:2] == ["--status"]:
+        return print_status()
     if sys.argv[1:2] == ["--mail-test"]:
         if not mail_configured():
             print("local.json 에 SMTP_USER, SMTP_PASSWORD 를 먼저 설정하세요.")
