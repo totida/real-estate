@@ -1237,9 +1237,20 @@ def dup_text(a: dict) -> str:
     return f"중개사 {n}곳{rng}"
 
 
-def type_text(a: dict) -> str:
-    """평면 타입 표시: 'A' → 'A타입' (값이 이미 '타입' 으로 끝나면 그대로)."""
+def type_code(a: dict) -> str:
+    """네이버식 타입 이름: 전용면적(소수점 버림) + 평면 기호, 예: 59.96㎡ · A → '59A'.
+
+    네이버는 A/B/C 를 면적별로 따로 붙여서(59㎡ A, 84㎡ A) 기호만으로는 구분이 안 된다.
+    """
     t = a.get("unit_type") or ""
+    if len(t) <= 2 and t.isalpha() and a.get("exclusive"):
+        return f"{int(a['exclusive'])}{t}"
+    return t
+
+
+def type_text(a: dict) -> str:
+    """'59A타입' (타입 정보가 없으면 빈 문자열)."""
+    t = type_code(a)
     return t if not t or t.endswith("타입") else f"{t}타입"
 
 
@@ -1338,7 +1349,7 @@ def listings_csv(reports: list[dict]) -> bytes:
             bp = broker_prices(a)
             w.writerow([r["name"], (a.get("price_won") or 0) // 10_000 or "", a.get("price", ""),
                         a.get("building", ""), a.get("floor", ""), round(floor_num(a), 1),
-                        pyeong_of(a) or "", a.get("unit_type") or "", a.get("supply") or "",
+                        pyeong_of(a) or "", type_code(a), a.get("supply") or "",
                         a.get("exclusive") or "",
                         a.get("first_price", ""), diff, a.get("first_seen", ""),
                         hist[0] if hist else "", a.get("realtor", ""),
@@ -1698,8 +1709,8 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                          + (f'<br><span style="font-size:11px;color:#b06000">{esc(dup_text(a))}</span>'
                             if dup_text(a) else "") + '</td>'
                          f"<td>{esc(place)}</td><td align=\"center\">{p or ''}"
-                         + (f'<br><span style="font-size:11px;color:#5f6368">{esc(a.get("unit_type"))}</span>'
-                            if a.get("unit_type") else "") + "</td>"
+                         + (f'<br><span style="font-size:11px;color:#5f6368">{esc(type_code(a))}</span>'
+                            if type_code(a) else "") + "</td>"
                          f'<td align="center" style="white-space:nowrap">{diff_html(d) or "-"}</td>'
                          f'<td align="center" style="white-space:nowrap">{esc(seen)}</td></tr>')
                 if hist:

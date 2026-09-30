@@ -1164,14 +1164,15 @@ class UnitTypeTest(unittest.TestCase):
                                                             "nameType": "A"}}}
         a = na.normalize_fin(item, "9")
         self.assertEqual(a["unit_type"], "A")
-        self.assertIn("26평 A타입", na.where_text(a))
+        self.assertIn("26평 59A타입", na.where_text(a))
         self.assertEqual(na.type_text({"unit_type": "59B타입"}), "59B타입")
         self.assertEqual(na.type_text({}), "")
         r = {"no": "9", "name": "X", "status": "ok", "new": [], "changes": [], "gone": [],
              "listings": [dict(a, trade="매매")]}
         _, text, body = na.format_briefing([r], "25평", datetime(2026, 10, 3, tzinfo=na.KST))
-        self.assertIn("26평 A타입", text)
-        self.assertIn(">A</span>", body)
+        self.assertIn("26평 59A타입", text)
+        self.assertIn(">59A</span>", body)
         import csv as _csv
         rows = list(_csv.DictReader(na.listings_csv([r]).decode("utf-8-sig").splitlines()))
-        self.assertEqual(rows[0]["타입"], "A")
+        self.assertEqual(rows[0]["타입"], "59A")
+        self.assertEqual(na.type_code({"unit_type": "B", "exclusive": 84.96}), "84B")
