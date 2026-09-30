@@ -923,7 +923,7 @@ def trade_summary(listings: list[dict]) -> str:
     counts = Counter(a["trade"] for a in listings)
     parts = [f"{t} {counts[t]}" for t in ("매매", "전세", "월세") if counts[t]]
     parts += [f"{t} {n}" for t, n in counts.items() if t not in ("매매", "전세", "월세")]
-    text = f"매물 {len(listings)}건" + (f" ({' · '.join(parts)})" if parts else "")
+    text = f"매물 {len(listings)}건" + (f" ({' · '.join(parts)})" if len(counts) > 1 else "")
     sale = sorted(a["price_won"] for a in listings if a["trade"] == "매매" and a.get("price_won"))
     if sale:
         text += f" · 매매 {won_text(sale[0])}" + (f"~{won_text(sale[-1])}" if sale[-1] != sale[0] else "")
@@ -1161,7 +1161,7 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         + f': 신규 {n_new} · 가격변동 {n_chg}'
         + (f" ({esc(all_stats)})" if all_stats else "") + f' · 사라짐 {n_gone}<br>'
         '단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다. 놓친 변동은 단지별 "최근 7일 변동"에 있습니다.</div>',
-        '<table width="100%" cellpadding="6" style="border-collapse:collapse;font-size:13px;'
+        '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:12px;'
         'margin-bottom:8px;width:100%">',
         '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">단지</th><th>매물</th>'
         '<th>신규</th><th>변동</th><th>사라짐</th><th>7일</th></tr>',
