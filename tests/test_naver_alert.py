@@ -970,6 +970,21 @@ class ComplexInfoTest(unittest.TestCase):
                   "addressInfo": {"address": {"city": "부산시", "division": "부산진구", "code": "26"}}}
         self.assertEqual(na.parse_complex_info(nested), {
             "households": 1384, "dongs": 12, "built": "2014.06", "address": "부산시 부산진구"})
+        # 실제 fin.land 응답 (서면아이파크1단지, 일부)
+        real = {"name": "서면아이파크1단지", "type": "A01",
+                "address": {"legalDivisionNumber": "2623010200", "legalDivisionLevel": "EUP", "city": "부산시",
+                            "division": "부산진구", "sector": "전포동", "jibun": "908",
+                            "roadName": "동성로 50", "zipCode": "47309"},
+                "coordinates": {"xCoordinate": 129.069852, "yCoordinate": 35.156381},
+                "totalHouseholdNumber": 1862, "leaseHouseholdNumber": 0, "dongCount": 25,
+                "useApprovalDate": "20210823", "approvalElapsedYear": 6,
+                "parkingInfo": {"totalParkingCount": 2047, "parkingCountPerHousehold": 1.09},
+                "highestDongFloor": 30, "lowestDongFloor": 14}
+        info = na.parse_complex_info(real)
+        self.assertEqual(info, {"households": 1862, "dongs": 25, "built": "2021.08",
+                                "address": "부산시 부산진구 전포동 908 (동성로 50)"})
+        self.assertEqual(na.complex_info_text(info, datetime(2026, 10, 1, tzinfo=na.KST)),
+                         "2021년 8월 준공(6년차) · 1,862세대 · 25개동 · 부산시 부산진구 전포동 908 (동성로 50)")
         self.assertEqual(na.parse_complex_info({"useApprovalDate": "2014"}), {"built": "2014"})
         self.assertEqual(na.parse_complex_info({"name": "X", "householdCount": 0}), {})
 

@@ -678,14 +678,23 @@ def _info_leaves(obj, path: str = ""):
         yield path, path.rsplit(".", 1)[-1].lower(), obj
 
 
+def _fin_address(a: dict) -> str:
+    """fin.land 주소 객체 → '부산시 부산진구 전포동 908 (동성로 50)'."""
+    base = " ".join(str(a[k]).strip() for k in ("city", "division", "sector", "jibun") if a.get(k))
+    road = str(a.get("roadName") or "").strip()
+    return f"{base} ({road})" if base and road else base or road
+
+
 def _info_addresses(obj) -> list[tuple[str, str]]:
     """주소 후보 (키 소문자, 주소). 주소가 시·구·동으로 나뉜 객체면 이어 붙인다."""
     out: list[tuple[str, str]] = []
-    skip = ("code", "zip", "postal", "coord", "latitude", "longitude")
+    skip = ("code", "zip", "postal", "coord", "latitude", "longitude", "number", "level")
     for k, v in obj.items() if isinstance(obj, dict) else ():
         kl = k.lower()
         if "address" in kl and isinstance(v, str) and v.strip():
             out.append((kl, v.strip()))
+        elif "address" in kl and isinstance(v, dict) and _fin_address(v):
+            out.append((kl, _fin_address(v)))
         elif isinstance(v, dict):
             parts = [x.strip() for kk, x in v.items() if isinstance(x, str) and x.strip()
                      and kk.lower() not in ("x", "y") and not any(w in kk.lower() for w in skip)]
