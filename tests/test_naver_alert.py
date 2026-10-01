@@ -367,6 +367,13 @@ class FakeNaver:
             raise na.BlockedError("429")
         return self.listings.get(no, [])
 
+    info_calls: list = []
+
+    def complex_info(self, no):
+        self.info_calls = self.info_calls + [no]
+        return {"complexNumber": no, "totalHouseholdNumber": 1384, "useApprovalDate": "20140630",
+                "address": {"city": "부산시", "division": "부산진구", "sector": "전포동"}}
+
     def close(self):
         self.closed = True
 
@@ -480,6 +487,9 @@ class MainTest(unittest.TestCase):
         self.assertIn("8억 → 7억", html_body)
         self.assertIn("조회 실패", html_body)  # 차단된 단지도 브리핑에 표시
         self.assertIn("최근 7일 변동 2건", html_body)  # 신규 1 + 가격 1, 확인 시각과 함께
+        self.assertIn("2014년 6월 준공", html_body)  # 단지 기본 정보
+        self.assertIn("1,384세대 · 부산시 부산진구 전포동", html_body)
+        self.assertEqual(fake.info_calls, ["1"])  # 단지 정보는 한 번만 받는다 (한 달 주기)
         self.assertEqual(len(na.load_state()["events"]), 2)
 
     def run_at(self, fake, hour):
@@ -822,8 +832,15 @@ class ChromiumIntegrationTest(unittest.TestCase):
 
             def do_GET(self):
                 body = b"<html><body>map</body></html>"
+                ctype = "text/html"
+                if self.path.startswith(na.NaverLand.COMPLEX_API + "?"):
+                    requests.append((self.path, None, ""))
+                    ctype = "application/json"
+                    body = json.dumps({"isSuccess": True, "result": {
+                        "name": "A", "totalHouseholdNumber": 1384, "useApprovalDate": "2014-06-30",
+                        "roadAddress": "부산 부산진구 전포대로 1"}}, ensure_ascii=False).encode()
                 self.send_response(200)
-                self.send_header("content-type", "text/html")
+                self.send_header("content-type", ctype)
                 self.send_header("content-length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -891,6 +908,24 @@ class ChromiumIntegrationTest(unittest.TestCase):
         self.assertIn("XX부동산 7억 9,000만", out.getvalue())
         self.assertIn("✅", out.getvalue())
 
+    def test_check_complex(self):
+        import contextlib
+        import io
+        import tempfile
+        cfg = Path(tempfile.mkdtemp()) / "config.json"
+        cfg.write_text(json.dumps({"complexes": {"119101": "A"}}))
+        orig = (na.CONFIG_PATH, na.NaverLand.FIN)
+        na.CONFIG_PATH, na.NaverLand.FIN = cfg, self.base
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                na.check_complex()
+        finally:
+            na.CONFIG_PATH, na.NaverLand.FIN = orig
+        self.assertEqual(self.requests[0][0], na.NaverLand.COMPLEX_API + "?complexNumber=119101")
+        self.assertIn("2014년 6월 준공", out.getvalue())
+        self.assertIn("1,384세대 · 부산 부산진구 전포대로 1", out.getvalue())
+
     def test_articles_via_xvfb(self):
         import shutil
         if not shutil.which("Xvfb"):
@@ -918,6 +953,59 @@ class ChromiumIntegrationTest(unittest.TestCase):
         self.assertEqual((payload["complexNumber"], payload["tradeTypes"]), ("119101", ["A1", "B1"]))
         self.assertEqual(self.requests[1][1]["lastInfo"], ["p", 1])
         self.assertNotIn("Headless", ua)
+
+
+class ComplexInfoTest(unittest.TestCase):
+    def test_parse_shapes(self):
+        # new.land 와 비슷한 평평한 형식
+        flat = {"complexName": "X", "totalHouseHoldCount": 1384, "totalDongCount": 12,
+                "useApproveYmd": "201406", "address": "부산시 부산진구 전포동 1",
+                "roadAddress": "부산 부산진구 전포대로 1"}
+        self.assertEqual(na.parse_complex_info(flat), {
+            "households": 1384, "dongs": 12, "built": "2014.06", "address": "부산 부산진구 전포대로 1"})
+        # 감싼 객체 + 평형별 목록 안의 세대수는 무시
+        nested = {"basicInfo": {"householdCount": "1,384", "approvalYmd": "20140630",
+                                "dongCount": 12},
+                  "pyeongs": [{"householdCount": 300}],
+                  "addressInfo": {"address": {"city": "부산시", "division": "부산진구", "code": "26"}}}
+        self.assertEqual(na.parse_complex_info(nested), {
+            "households": 1384, "dongs": 12, "built": "2014.06", "address": "부산시 부산진구"})
+        self.assertEqual(na.parse_complex_info({"useApprovalDate": "2014"}), {"built": "2014"})
+        self.assertEqual(na.parse_complex_info({"name": "X", "householdCount": 0}), {})
+
+    def test_text(self):
+        now = datetime(2026, 10, 3, tzinfo=na.KST)
+        info = {"built": "2014.06", "households": 1384, "dongs": 12, "address": "부산 부산진구"}
+        self.assertEqual(na.complex_info_text(info, now),
+                         "2014년 6월 준공(13년차) · 1,384세대 · 12개동 · 부산 부산진구")
+        self.assertEqual(na.complex_info_text({"built": "2014"}), "2014년 준공")
+        self.assertEqual(na.complex_info_text(None), "")
+
+    def test_refresh_and_override(self):
+        class Naver:
+            calls, fail = 0, False
+
+            def complex_info(self, no):
+                self.calls += 1
+                if self.fail:
+                    raise RuntimeError("404")
+                return {"totalHouseholdNumber": 500}
+        n, state = Naver(), {}
+        self.assertTrue(na.update_complex_info(state, n, "1", "2026-10-01"))
+        self.assertFalse(na.update_complex_info(state, n, "1", "2026-10-30"))  # 한 달 안에는 다시 안 받음
+        n.fail = True
+        self.assertTrue(na.update_complex_info(state, n, "1", "2026-10-31"))
+        self.assertEqual(state["complex_info"]["1"]["households"], 500)  # 실패해도 예전 값 유지
+        self.assertFalse(na.update_complex_info(state, n, "1", "2026-11-06"))
+        self.assertTrue(na.update_complex_info(state, n, "1", "2026-11-07"))  # 실패 후 7일 뒤 재시도
+        with self.assertRaises(na.BlockedError):
+            class Blocked:
+                def complex_info(self, no):
+                    raise na.BlockedError("429")
+            na.update_complex_info(state, Blocked(), "2", "2026-10-01")
+        config = {"complex_info": {"1": {"built": "2014.06", "households": 1384}}}
+        self.assertEqual(na.complex_details(state, config, "1"), {"households": 1384, "built": "2014.06"})
+        self.assertEqual(na.complex_details({}, {}, "9"), {})
 
 
 if __name__ == "__main__":

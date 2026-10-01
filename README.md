@@ -55,6 +55,7 @@ termux-wake-lock
 지난 메일 이후 여러 번 조회한 변동을 확인 시각과 함께 모두 담습니다.
 (신규 매물, 가격 변동, 사라진 매물, 최근 7일 변동, 현재 매매 매물 가격순)
 단지 이름을 누르면 네이버 부동산의 그 단지 매물 목록이, 매물을 누르면 매물 페이지가 열립니다.
+단지 이름 아래에 준공년월·세대수·동 수·주소를 보여줍니다 (네이버에서 한 달에 한 번 받아 저장).
 메일이 설정되면 폰 알림 대신 메일로 받고, 조회·메일 전송 실패만 폰 알림으로 옵니다.
 
 1. Gmail 계정에서 2단계 인증을 켜고 [앱 비밀번호](https://myaccount.google.com/apppasswords)를 만듭니다 (16자리).
@@ -79,6 +80,10 @@ termux-wake-lock
 - **메일 표 정렬**: `"sort": ["price", "dong", "-floor"]` 앞이 우선, `-` 는 내림차순.
   `price` 가격, `dong` 동, `floor` 층(저/중/고층은 총 층수의 20/50/80%로 계산), `pyeong` 평, `registered` 등록일.
   메일에는 전체 매매 매물 엑셀(CSV) 파일이 첨부되어 원하는 열로 직접 정렬할 수 있습니다.
+- **단지 정보 직접 적기** (네이버에서 못 읽을 때): 적은 값이 우선합니다.
+  ```json
+  "complex_info": {"119101": {"built": "2014.06", "households": 1384, "dongs": 12, "address": "부산 부산진구 …"}}
+  ```
 - **거래 유형**: `trade_types`: `A1` 매매, `B1` 전세, `B2` 월세 (현재 매매만 `["A1"]`)
 - **텔레그램** (선택): `local.json` 에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 를 적습니다.
 - **크로미움 옵션** (환경변수):
@@ -93,6 +98,7 @@ termux-wake-lock
 - **크로미움 실행 실패**: 오류에 나온 로그를 확인하고, `CHROMIUM_XVFB=1 python naver_alert.py` 로 시도해 보세요.
 - 실행 기록: `tail -50 ~/alert.log`
 - 중개사별 호가 수신 점검: `python naver_alert.py --check-brokers [단지번호]` (한 페이지만 조회, 기록 안 바꿈)
+- 단지 정보(준공년월·세대수·주소) 점검: `python naver_alert.py --check-complex [단지번호]` (응답 원본과 읽은 값 표시)
 - 기록 상태 확인: `python naver_alert.py --status` (단지별 추적 매물·가격 이력·최근 7일 변동)
 - 사라진 매물 기록: `python naver_alert.py --history` (최근 30건, `--history 100` 처럼 개수 지정)
 - 층수: 중개사가 층을 공개하지 않은 매물은 네이버에서도 `저/중/고층`으로만 나옵니다.

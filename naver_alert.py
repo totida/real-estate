@@ -353,6 +353,16 @@ class Chromium:
         out = self.evaluate(js)
         return out["status"], out["text"]
 
+    def get_text(self, url: str) -> tuple[int, str]:
+        """페이지 안에서 GET fetch 를 실행해 (상태코드, 본문) 을 돌려준다."""
+        js = f"""(async () => {{
+            const r = await fetch({json.dumps(url)}, {{
+                credentials: "include", headers: {{"accept": "application/json, text/plain, */*"}}}});
+            return {{status: r.status, text: await r.text()}};
+        }})()"""
+        out = self.evaluate(js)
+        return out["status"], out["text"]
+
     def close(self) -> None:
         if self.ws:
             try:
@@ -384,6 +394,7 @@ class NaverLand:
     # 단지 페이지(/complexes/…)는 다른 오리진에서 그려져 fetch 가 CORS 로 막히므로 지도 페이지를 연다.
     START_PAGE = "/map"
     ARTICLE_API = "/front-api/v1/complex/article/list"
+    COMPLEX_API = "/front-api/v1/complex"  # 단지 기본 정보 (준공년월·세대수·주소 등)
 
     def __init__(self, fin: str | None = None) -> None:
         self.fin = fin or self.FIN
@@ -464,6 +475,22 @@ class NaverLand:
             last_info = result.get("lastInfo") or []
             time.sleep(1.5)
         return out
+
+    def complex_info(self, complex_no: str) -> dict:
+        """단지 기본 정보 원본 응답(result)."""
+        url = f"{self.fin}{self.COMPLEX_API}?complexNumber={urllib.parse.quote(complex_no)}"
+        status, text = self._page().get_text(url)
+        if status == 429:
+            raise BlockedError(f"네이버가 요청을 막았습니다(429): {text[:200]}")
+        if status != 200:
+            raise RuntimeError(f"단지 정보 API 응답 {status}: {text[:200]}")
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise RuntimeError(f"단지 정보 API 예상 밖 응답: {text[:200]}") from None
+        if not isinstance(data, dict) or data.get("isSuccess") is False:
+            raise RuntimeError(f"단지 정보 API 예상 밖 응답: {text[:200]}")
+        return data["result"] if isinstance(data.get("result"), dict) else data
 
     def close(self) -> None:
         if self._browser:
@@ -623,6 +650,130 @@ def article_url(a: dict) -> str:
 
 def complex_url(complex_no: str) -> str:
     return f"https://fin.land.naver.com/complexes/{complex_no}?tab=article"
+
+
+# ---------------------------------------------------------------- 단지 기본 정보
+
+INFO_REFRESH_DAYS = 30  # 준공년월·세대수는 거의 안 바뀌므로 한 달에 한 번만 다시 받는다
+INFO_RETRY_DAYS = 7  # 받지 못했으면 일주일 뒤 다시 시도
+
+
+def _info_count(v) -> int | None:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v) if v > 0 else None
+    if isinstance(v, str) and re.fullmatch(r"[\d,]+", v.strip()):
+        return int(v.replace(",", "")) or None
+    return None
+
+
+def _info_leaves(obj, path: str = ""):
+    """(경로, 키 소문자, 값). 평형별 목록 같은 배열 안은 단지 전체 값이 아니므로 보지 않는다."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if not isinstance(v, list):
+                yield from _info_leaves(v, f"{path}.{k}" if path else str(k))
+    else:
+        yield path, path.rsplit(".", 1)[-1].lower(), obj
+
+
+def _info_addresses(obj) -> list[tuple[str, str]]:
+    """주소 후보 (키 소문자, 주소). 주소가 시·구·동으로 나뉜 객체면 이어 붙인다."""
+    out: list[tuple[str, str]] = []
+    skip = ("code", "zip", "postal", "coord", "latitude", "longitude")
+    for k, v in obj.items() if isinstance(obj, dict) else ():
+        kl = k.lower()
+        if "address" in kl and isinstance(v, str) and v.strip():
+            out.append((kl, v.strip()))
+        elif isinstance(v, dict):
+            parts = [x.strip() for kk, x in v.items() if isinstance(x, str) and x.strip()
+                     and kk.lower() not in ("x", "y") and not any(w in kk.lower() for w in skip)]
+            if "address" in kl and parts and not _info_addresses(v):
+                out.append((kl, " ".join(parts)))
+            else:
+                out += _info_addresses(v)
+    return out
+
+
+def parse_complex_info(raw: dict) -> dict:
+    """네이버 단지 정보 응답에서 준공년월(built '2014.06')·세대수·동 수·주소를 뽑는다.
+
+    응답 형식이 공개돼 있지 않아 키 이름의 일부(household, approv, address 등)로 찾는다.
+    """
+    info: dict = {}
+    leaves = list(_info_leaves(raw))
+    households = [(("total" in k), _info_count(v)) for _, k, v in leaves if "household" in k]
+    households = [x for x in households if x[1]]
+    if households:
+        info["households"] = max(households, key=lambda x: x[0])[1]  # total 이 붙은 값 우선
+    dongs = [_info_count(v) for _, k, v in leaves if "dong" in k and ("count" in k or k.endswith("cnt"))]
+    if any(dongs):
+        info["dongs"] = next(d for d in dongs if d)
+    for _, k, v in leaves:
+        if any(w in k for w in ("approv", "completion", "builtdate", "builddate", "constructiondate")):
+            digits = re.sub(r"\D", "", str(v))
+            if len(digits) >= 4 and 1950 <= int(digits[:4]) <= 2100:
+                month = digits[4:6] if len(digits) >= 6 and "01" <= digits[4:6] <= "12" else ""
+                info["built"] = digits[:4] + (f".{month}" if month else "")
+                break
+    addresses = _info_addresses(raw)
+    if addresses:
+        road = [a for k, a in addresses if "road" in k]
+        info["address"] = (road or [a for _, a in addresses])[0]
+    return info
+
+
+def update_complex_info(state: dict, naver, complex_no: str, today: str) -> bool:
+    """단지 정보를 받을 때가 됐으면 받아 state['complex_info'] 에 저장한다. 실제로 요청했으면 True.
+
+    받지 못해도 매물 조회·메일에는 영향이 없다 (예전에 받은 정보는 그대로 둔다).
+    """
+    cache = state.setdefault("complex_info", {})
+    old = cache.get(complex_no) or {}
+    days = days_between(old.get("fetched"), today)
+    if old and days is not None and days < (INFO_REFRESH_DAYS if old.get("ok") else INFO_RETRY_DAYS):
+        return False
+    try:
+        info = parse_complex_info(naver.complex_info(complex_no))
+    except BlockedError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        print(f"경고: 단지 정보({complex_no}) 조회 실패: {e}", file=sys.stderr)
+        info = {}
+    if info:
+        cache[complex_no] = dict(info, fetched=today, ok=True)
+    else:
+        cache[complex_no] = dict(old, fetched=today, ok=False)
+    return True
+
+
+def complex_details(state: dict, config: dict, complex_no: str) -> dict:
+    """저장된 단지 정보 + config.json 의 complex_info 로 직접 적은 값(우선)."""
+    info = {k: v for k, v in ((state.get("complex_info") or {}).get(complex_no) or {}).items()
+            if k in ("built", "households", "dongs", "address")}
+    info.update((config.get("complex_info") or {}).get(complex_no) or {})
+    return info
+
+
+def complex_info_text(info: dict | None, now: datetime | None = None) -> str:
+    """'2014년 6월 준공(13년차) · 1,384세대 · 12개동 · 부산 부산진구 …'"""
+    info = info or {}
+    parts = []
+    m = re.match(r"(\d{4})\D?(\d{1,2})?", str(info.get("built") or ""))
+    if m:
+        year = int(m.group(1))
+        built = f"{year}년" + (f" {int(m.group(2))}월" if m.group(2) else "") + " 준공"
+        if now:
+            built += f"({now.year - year + 1}년차)"
+        parts.append(built)
+    for key, unit in (("households", "세대"), ("dongs", "개동")):
+        n = _info_count(info.get(key))
+        if n:
+            parts.append(f"{n:,}{unit}")
+    if info.get("address"):
+        parts.append(str(info["address"]))
+    return " · ".join(parts)
 
 
 def matches_keyword(name: str, keyword: str) -> bool:
@@ -1059,7 +1210,8 @@ def mail_preview(to_self: bool = True) -> int:
                     for key, t in tracked.items() if t["complexNo"] == str(no) and not t.get("missed")
                     and matches_pyeong(t, pyeongs)]
         briefing.append({"no": str(no), "name": name, "status": "ok", "listings": listings,
-                         "new": [], "changes": [], "gone": [], "week": recent_events(state, str(no), now)})
+                         "new": [], "changes": [], "gone": [], "week": recent_events(state, str(no), now),
+                         "info": complex_details(state, config, str(no))})
     subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
                                                parse_time(state.get("last_mail")))
     subject = subject.replace("[매물 브리핑]", "[매물 브리핑 미리보기]", 1)
@@ -1108,6 +1260,26 @@ def check_brokers(complex_no: str | None = None) -> int:
         print(f"결과: ✅ 대표 외 중개사 호가도 받고 있습니다 ({ok}/{min(len(groups), 3)}건 확인)")
     else:
         print("결과: ❌ 대표 중개사 호가만 들어옵니다. 위 '다른 중개사 매물 항목' 줄을 알려주세요.")
+    return 0
+
+
+def check_complex(complex_no: str | None = None) -> int:
+    """네이버 단지 정보 응답을 그대로 보여주고, 거기서 읽은 준공년월·세대수·주소를 확인한다 (기록 안 바꿈)."""
+    config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    complexes = {str(k): v for k, v in (config.get("complexes") or {}).items()}
+    no = complex_no or next(iter(complexes))
+    naver = NaverLand()
+    try:
+        raw = naver.complex_info(no)
+    finally:
+        naver.close()
+    print(f"{complexes.get(no, no)} ({no}) 단지 정보 응답:")
+    print(json.dumps(raw, ensure_ascii=False)[:2500])
+    info = parse_complex_info(raw)
+    print(f"읽은 값: {json.dumps(info, ensure_ascii=False)}")
+    print("메일 표시: " + (complex_info_text(info, datetime.now(KST)) or "없음"))
+    if not info:
+        print("결과: ❌ 읽지 못했습니다. 위 응답을 알려주세요. (config.json 의 complex_info 로 직접 적을 수도 있습니다)")
     return 0
 
 
@@ -1602,6 +1774,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         text += [f"■ {r['name']}", f"  {url}"]
         h.append(f'<h3 style="font-size:16px;margin:24px 0 2px;padding-top:12px;'
                  f'border-top:2px solid #1f1f1f">{link(url, r["name"])}</h3>')
+        about = complex_info_text(r.get("info"), now)
+        if about:
+            text.append(f"  {about}")
+            h.append(f'<div style="color:#5f6368;font-size:12px;margin-bottom:2px">{esc(about)}</div>')
         if r["status"] == "failed":
             text += [f"  조회 실패: {r.get('error', '')}", ""]
             h.append(f'<div style="color:{red}">조회 실패: {esc(r.get("error", ""))}</div>')
@@ -1819,6 +1995,8 @@ def main() -> int:
         return print_status()
     if sys.argv[1:2] == ["--mail-preview"]:
         return mail_preview(to_self="--all" not in sys.argv[2:])
+    if sys.argv[1:2] == ["--check-complex"]:
+        return check_complex(sys.argv[2] if len(sys.argv) > 2 else None)
     if sys.argv[1:2] == ["--check-brokers"]:
         return check_brokers(sys.argv[2] if len(sys.argv) > 2 else None)
     if sys.argv[1:2] == ["--mail-test"]:
@@ -1871,6 +2049,7 @@ def main() -> int:
     wanted = lambda a: matches_pyeong(a, pyeongs)  # noqa: E731
     ok = 0
     abort = ""
+    info_blocked = False
     # 감시 대상에서 빠진 단지·거래유형(예: 매매만 보기로 바꾼 뒤의 전세·월세)의 기록은 정리한다
     trades = {TRADE_NAMES.get(t, t) for t in trade_types}
     state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
@@ -1894,6 +2073,13 @@ def main() -> int:
                 reports[no] = {"status": "failed", "error": str(e)}
                 continue
             ok += 1
+            if not info_blocked:
+                try:
+                    if update_complex_info(state, naver, no, today):
+                        time.sleep(1.5)
+                except BlockedError as e:
+                    print(f"경고: 단지 정보 조회가 막혀 나머지 단지 정보는 건너뜁니다: {e}", file=sys.stderr)
+                    info_blocked = True
             fresh = diff_and_update(state, items, now)
             changes: list[dict] = []
             relisted: set = set()
@@ -1949,7 +2135,8 @@ def main() -> int:
         briefing = []
         for no, name in complexes.items():
             r = dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
-                     no=no, name=name, week=recent_events(state, no, now))
+                     no=no, name=name, week=recent_events(state, no, now),
+                     info=complex_details(state, config, no))
             # 지난 메일 이후 여러 번 조회했으면 아직 메일로 안 보낸 변동을 모두 담는다
             pending = [e for e in r["week"] if not e.get("mailed")][::-1]
             multi = len({e["at"] for e in pending}) > 1
