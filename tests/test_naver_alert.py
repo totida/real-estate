@@ -978,11 +978,19 @@ class ComplexInfoTest(unittest.TestCase):
                 "coordinates": {"xCoordinate": 129.069852, "yCoordinate": 35.156381},
                 "totalHouseholdNumber": 1862, "leaseHouseholdNumber": 0, "dongCount": 25,
                 "useApprovalDate": "20210823", "approvalElapsedYear": 6,
+                "constructionCompany": "에이치디씨현대산업개발(주)",
+                "buildingRatioInfo": {"floorAreaRatio": 256, "buildingCoverageRatio": 16},
                 "parkingInfo": {"totalParkingCount": 2047, "parkingCountPerHousehold": 1.09},
                 "highestDongFloor": 30, "lowestDongFloor": 14}
         info = na.parse_complex_info(real)
         self.assertEqual(info, {"households": 1862, "dongs": 25, "built": "2021.08",
-                                "address": "부산시 부산진구 전포동 908 (동성로 50)"})
+                                "address": "부산시 부산진구 전포동 908 (동성로 50)",
+                                "builder": "에이치디씨현대산업개발", "top_floor": 30, "parking": 1.09, "far": 256})
+        self.assertEqual(na.complex_extra_text(info),
+                         "에이치디씨현대산업개발 시공 · 최고 30층 · 주차 1.09대/세대 · 용적률 256%")
+        self.assertEqual(na.complex_extra_text({}), "")
+        # 세대당 주차 대수를 세대수로 잘못 읽지 않음
+        self.assertNotIn("households", na.parse_complex_info({"parkingCountPerHousehold": 2}))
         self.assertEqual(na.complex_info_text(info, datetime(2026, 10, 1, tzinfo=na.KST)),
                          "2021년 8월 준공(6년차) · 1,862세대 · 25개동 · 부산시 부산진구 전포동 908 (동성로 50)")
         self.assertEqual(na.parse_complex_info({"useApprovalDate": "2014"}), {"built": "2014"})
@@ -1008,6 +1016,9 @@ class ComplexInfoTest(unittest.TestCase):
         n, state = Naver(), {}
         self.assertTrue(na.update_complex_info(state, n, "1", "2026-10-01"))
         self.assertFalse(na.update_complex_info(state, n, "1", "2026-10-30"))  # 한 달 안에는 다시 안 받음
+        state["complex_info"]["1"]["v"] = 1  # 예전 버전으로 저장된 정보는 바로 다시 받음
+        self.assertTrue(na.update_complex_info(state, n, "1", "2026-10-30"))
+        state["complex_info"]["1"]["fetched"] = "2026-10-01"
         n.fail = True
         self.assertTrue(na.update_complex_info(state, n, "1", "2026-10-31"))
         self.assertEqual(state["complex_info"]["1"]["households"], 500)  # 실패해도 예전 값 유지

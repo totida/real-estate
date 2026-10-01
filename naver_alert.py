@@ -656,6 +656,8 @@ def complex_url(complex_no: str) -> str:
 
 INFO_REFRESH_DAYS = 30  # 준공년월·세대수는 거의 안 바뀌므로 한 달에 한 번만 다시 받는다
 INFO_RETRY_DAYS = 7  # 받지 못했으면 일주일 뒤 다시 시도
+INFO_VERSION = 2  # 읽는 항목이 늘면 올린다 → 저장된 정보를 기다리지 않고 바로 다시 받음
+INFO_KEYS = ("built", "households", "dongs", "address", "builder", "top_floor", "parking", "far")
 
 
 def _info_count(v) -> int | None:
@@ -706,13 +708,15 @@ def _info_addresses(obj) -> list[tuple[str, str]]:
 
 
 def parse_complex_info(raw: dict) -> dict:
-    """네이버 단지 정보 응답에서 준공년월(built '2014.06')·세대수·동 수·주소를 뽑는다.
+    """네이버 단지 정보 응답에서 준공년월(built '2014.06')·세대수·동 수·주소,
+    시공사(builder)·최고층(top_floor)·세대당 주차(parking)·용적률(far)을 뽑는다.
 
     응답 형식이 공개돼 있지 않아 키 이름의 일부(household, approv, address 등)로 찾는다.
     """
     info: dict = {}
     leaves = list(_info_leaves(raw))
-    households = [(("total" in k), _info_count(v)) for _, k, v in leaves if "household" in k]
+    households = [(("total" in k), _info_count(v)) for _, k, v in leaves
+                  if "household" in k and "parking" not in k and "per" not in k]
     households = [x for x in households if x[1]]
     if households:
         info["households"] = max(households, key=lambda x: x[0])[1]  # total 이 붙은 값 우선
@@ -730,6 +734,15 @@ def parse_complex_info(raw: dict) -> dict:
     if addresses:
         road = [a for k, a in addresses if "road" in k]
         info["address"] = (road or [a for _, a in addresses])[0]
+    for _, k, v in leaves:
+        if ("constructioncompany" in k or "builder" in k) and isinstance(v, str) and v.strip():
+            info.setdefault("builder", re.sub(r"\s*(\(주\)|㈜|주식회사)\s*", "", v).strip() or v.strip())
+        elif "highest" in k and "floor" in k and _info_count(v):
+            info.setdefault("top_floor", _info_count(v))
+        elif "parking" in k and "household" in k and isinstance(v, (int, float)) and v > 0:
+            info.setdefault("parking", round(float(v), 2))
+        elif "floorarearatio" in k and isinstance(v, (int, float)) and v > 0:
+            info.setdefault("far", round(float(v)))
     return info
 
 
@@ -741,7 +754,8 @@ def update_complex_info(state: dict, naver, complex_no: str, today: str) -> bool
     cache = state.setdefault("complex_info", {})
     old = cache.get(complex_no) or {}
     days = days_between(old.get("fetched"), today)
-    if old and days is not None and days < (INFO_REFRESH_DAYS if old.get("ok") else INFO_RETRY_DAYS):
+    if (old and days is not None and old.get("v") == INFO_VERSION
+            and days < (INFO_REFRESH_DAYS if old.get("ok") else INFO_RETRY_DAYS)):
         return False
     try:
         info = parse_complex_info(naver.complex_info(complex_no))
@@ -751,16 +765,16 @@ def update_complex_info(state: dict, naver, complex_no: str, today: str) -> bool
         print(f"경고: 단지 정보({complex_no}) 조회 실패: {e}", file=sys.stderr)
         info = {}
     if info:
-        cache[complex_no] = dict(info, fetched=today, ok=True)
+        cache[complex_no] = dict(info, fetched=today, ok=True, v=INFO_VERSION)
     else:
-        cache[complex_no] = dict(old, fetched=today, ok=False)
+        cache[complex_no] = dict(old, fetched=today, ok=False, v=INFO_VERSION)
     return True
 
 
 def complex_details(state: dict, config: dict, complex_no: str) -> dict:
     """저장된 단지 정보 + config.json 의 complex_info 로 직접 적은 값(우선)."""
     info = {k: v for k, v in ((state.get("complex_info") or {}).get(complex_no) or {}).items()
-            if k in ("built", "households", "dongs", "address")}
+            if k in INFO_KEYS}
     info.update((config.get("complex_info") or {}).get(complex_no) or {})
     return info
 
@@ -782,6 +796,21 @@ def complex_info_text(info: dict | None, now: datetime | None = None) -> str:
             parts.append(f"{n:,}{unit}")
     if info.get("address"):
         parts.append(str(info["address"]))
+    return " · ".join(parts)
+
+
+def complex_extra_text(info: dict | None) -> str:
+    """'HDC현대산업개발 시공 · 최고 30층 · 주차 1.09대/세대 · 용적률 256%'"""
+    info = info or {}
+    parts = []
+    if info.get("builder"):
+        parts.append(f"{info['builder']} 시공")
+    if _info_count(info.get("top_floor")):
+        parts.append(f"최고 {_info_count(info['top_floor'])}층")
+    if isinstance(info.get("parking"), (int, float)) and info["parking"] > 0:
+        parts.append(f"주차 {float(info['parking']):g}대/세대")
+    if isinstance(info.get("far"), (int, float)) and info["far"] > 0:
+        parts.append(f"용적률 {round(info['far'])}%")
     return " · ".join(parts)
 
 
@@ -1287,6 +1316,7 @@ def check_complex(complex_no: str | None = None) -> int:
     info = parse_complex_info(raw)
     print(f"읽은 값: {json.dumps(info, ensure_ascii=False)}")
     print("메일 표시: " + (complex_info_text(info, datetime.now(KST)) or "없음"))
+    print("          " + (complex_extra_text(info) or "(시공사·층·주차·용적률 없음)"))
     if not info:
         print("결과: ❌ 읽지 못했습니다. 위 응답을 알려주세요. (config.json 의 complex_info 로 직접 적을 수도 있습니다)")
     return 0
@@ -1783,10 +1813,10 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         text += [f"■ {r['name']}", f"  {url}"]
         h.append(f'<h3 style="font-size:16px;margin:24px 0 2px;padding-top:12px;'
                  f'border-top:2px solid #1f1f1f">{link(url, r["name"])}</h3>')
-        about = complex_info_text(r.get("info"), now)
-        if about:
-            text.append(f"  {about}")
-            h.append(f'<div style="color:#5f6368;font-size:12px;margin-bottom:2px">{esc(about)}</div>')
+        for about in (complex_info_text(r.get("info"), now), complex_extra_text(r.get("info"))):
+            if about:
+                text.append(f"  {about}")
+                h.append(f'<div style="color:#5f6368;font-size:12px">{esc(about)}</div>')
         if r["status"] == "failed":
             text += [f"  조회 실패: {r.get('error', '')}", ""]
             h.append(f'<div style="color:{red}">조회 실패: {esc(r.get("error", ""))}</div>')
