@@ -1,5 +1,6 @@
 import json
 import sys
+import re
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -666,6 +667,17 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("이번 변동: 오전 8시 ~ 오후 1시 사이", text)  # 같은 날이면 날짜 생략
         self.assertIn("이번 변동 없음", text)
         self.assertIn("최근 7일 변동 2건", body)
+        # 맨 위 요약에도 7일 기준 신규·변동·사라짐
+        self.assertIn("최근 7일: 신규 0 · 가격변동 1 (상승 0 · 하락 1 · 평균 ▼3,000만 (-4.8%)) · 사라짐 1", text)
+        self.assertIn("최근 7일: 신규 0 · 가격변동 1", body)
+        self.assertIn('<th colspan="3" style="border-left:1px solid #dadce0">최근 7일</th>', body)
+        row = body[body.index('서면아이파크2단지</a></td>'):]
+        row = row[:row.index("</tr>")]
+        self.assertEqual(re.findall(r">([^<>]*)</td>", row)[1:], ["0", "0", "0", "0", "0", "▼1", "1"])
+        failed = dict(r, status="failed", error="429")
+        _, _, fbody = na.format_briefing([failed], "25~26평", now)
+        self.assertIn('colspan=4 style="white-space:nowrap">조회 실패</td>', fbody)
+        self.assertIn(">▼1</td>", fbody)  # 조회 실패여도 7일 기록은 보임
         self.assertIn("10/3 오전 8시 [가격] [매매] 6억 2,000만 → 5억 9,000만 (▼3,000만)", text)
         self.assertIn("10/2 오후 8시 [사라짐] [매매] 5억 7,000만", text)
         self.assertIn('href="https://fin.land.naver.com/articles/5"', body)

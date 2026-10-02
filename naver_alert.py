@@ -1752,6 +1752,14 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     ok = [r for r in reports if r["status"] != "failed"]
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
     all_stats = change_stats([c for r in ok for c in r.get("changes", [])])
+
+    def week_of(r: dict, kind: str) -> list:
+        return [e["item"] for e in r.get("week") or [] if e["kind"] == kind]
+    w_new, w_gone = (sum(len(week_of(r, k)) for r in reports) for k in ("new", "gone"))
+    w_changes = [c for r in reports for c in week_of(r, "change")]
+    w_stats = change_stats(w_changes)
+    week_line = (f"최근 7일: 신규 {w_new} · 가격변동 {len(w_changes)}"
+                 + (f" ({w_stats})" if w_stats else "") + f" · 사라짐 {w_gone}")
     day = time_label(now)  # 하루 여러 번 받아도 구분되게
     if since and not SHOW_TIME:
         window = f"{md(since)} ~ {md(now)}"
@@ -1783,24 +1791,31 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         + (f" ({esc(window)} 사이)" if window else "")
         + f': 신규 {n_new} · 가격변동 {n_chg}'
         + (f" ({esc(all_stats)})" if all_stats else "") + f' · 사라짐 {n_gone}<br>'
+        f'{esc(week_line)}<br>'
         '단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다. 놓친 변동은 단지별 "최근 7일 변동"에 있습니다.</div>',
         '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:12px;'
         'margin-bottom:8px;width:100%">',
-        '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left">단지</th><th>매물</th>'
-        '<th>신규</th><th>변동</th><th>사라짐</th><th>7일</th></tr>',
+        '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left" rowspan="2">단지</th>'
+        '<th rowspan="2">매물</th><th colspan="3">이번</th>'
+        '<th colspan="3" style="border-left:1px solid #dadce0">최근 7일</th></tr>'
+        '<tr style="background:#f1f3f4;white-space:nowrap;font-weight:400"><th>신규</th><th>변동</th>'
+        '<th>사라짐</th><th style="border-left:1px solid #dadce0">신규</th><th>변동</th><th>사라짐</th></tr>',
     ]
+    text.insert(1, week_line)
     if window:
         text.insert(1, f"이번 변동: {window} 사이")
     if all_stats:
         text.insert(1, f"가격 변동: {all_stats}")
     for r in reports:
-        week = str(len(r.get("week", [])))
-        cells = (["조회 실패", "", "", "", week] if r["status"] == "failed" else
-                 [str(len(r.get("listings", []))), str(len(r.get("new", []))),
-                  change_counts(r.get("changes", [])), str(len(r.get("gone", []))), week])
+        week = [str(len(week_of(r, "new"))), change_counts(week_of(r, "change")), str(len(week_of(r, "gone")))]
+        cells = ([("조회 실패", 4)] if r["status"] == "failed" else
+                 [(str(len(r.get("listings", []))), 1), (str(len(r.get("new", []))), 1),
+                  (change_counts(r.get("changes", [])), 1), (str(len(r.get("gone", []))), 1)])
+        cells += [(c, 1) for c in week]
         h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}</td>'
-                 + "".join(f'<td align="center" style="white-space:nowrap">{esc(c)}</td>'
-                           for c in cells) + "</tr>")
+                 + "".join(f'<td align="center"{f" colspan={n}" if n > 1 else ""} style="white-space:nowrap'
+                           + (';border-left:1px solid #e0e0e0' if i == len(cells) - 3 else "")
+                           + f'">{esc(c)}</td>' for i, (c, n) in enumerate(cells)) + "</tr>")
     h.append("</table>")
 
     def section(title: str, items: list[str]) -> None:
