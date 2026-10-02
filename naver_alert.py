@@ -1249,7 +1249,8 @@ def mail_preview(to_self: bool = True) -> int:
                     and matches_pyeong(t, pyeongs)]
         briefing.append({"no": str(no), "name": name, "status": "ok", "listings": listings,
                          "new": [], "changes": [], "gone": [], "week": recent_events(state, str(no), now),
-                         "info": complex_details(state, config, str(no))})
+                         "info": complex_details(state, config, str(no)),
+                         "totals": (state.get("totals") or {}).get(str(no))})
     subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
                                                parse_time(state.get("last_mail")))
     subject = subject.replace("[매물 브리핑]", "[매물 브리핑 미리보기]", 1)
@@ -1609,9 +1610,47 @@ EVENT_KEYS = ("articleNo", "trade", "price", "price_won", "rent_won", "old_price
 EVENT_NAMES = {"new": "신규", "change": "가격", "gone": "사라짐"}
 
 
+def _add_total(t: dict, kind: str, a: dict) -> None:
+    """누계에 변동 하나를 더한다. 가격변동은 전체 건수, 상승·하락·평균은 최저 호가를 바꾼 것만."""
+    if kind != "change":
+        t[kind] = t.get(kind, 0) + 1
+        return
+    t["changes"] = t.get("changes", 0) + 1
+    old, new = stat_pair(a)
+    if counted(a) and old and new and old != new:
+        t["up" if new > old else "down"] = t.get("up" if new > old else "down", 0) + 1
+        t["diff_sum"] = t.get("diff_sum", 0) + (new - old)
+        t["pct_sum"] = round(t.get("pct_sum", 0.0) + (new - old) / old * 100, 4)
+
+
+def _seed_totals(state: dict, today: str) -> dict:
+    """누계를 처음 만들 때: 보관 중인 변동 기록(최근 14일)으로 시작하고, 시작일은 처음 추적한 날."""
+    totals: dict = {}
+    starts: dict = {}
+    for t in (state.get("tracked") or {}).values():
+        if t.get("first_seen"):
+            starts[t["complexNo"]] = min(starts.get(t["complexNo"], t["first_seen"]), t["first_seen"])
+    for e in state.get("events") or []:
+        t = totals.setdefault(e["complexNo"], {})
+        _add_total(t, e["kind"], e["item"])
+        starts[e["complexNo"]] = min(starts.get(e["complexNo"], e["at"][:10]), e["at"][:10])
+    for no in set(totals) | set(starts):
+        totals.setdefault(no, {})["since"] = starts.get(no, today)
+    return totals
+
+
 def log_events(state: dict, reports: dict, now: datetime, since: datetime | None,
                keep_days: int = 14) -> None:
-    """이번에 확인한 변동을 시각과 함께 state['events'] 에 쌓는다 (최근 7일 브리핑용)."""
+    """이번에 확인한 변동을 시각과 함께 state['events'] 에 쌓고 (최근 7일 목록용, 14일 보관),
+    state['totals'] 누계에도 더한다 (누계는 계속 쌓임)."""
+    if "totals" not in state:
+        state["totals"] = _seed_totals(state, now.strftime("%Y-%m-%d"))
+    totals = state["totals"]
+    for no, r in reports.items():
+        t = totals.setdefault(no, {"since": now.strftime("%Y-%m-%d")})
+        for kind, key in (("new", "new"), ("change", "changes"), ("gone", "gone")):
+            for a in r.get(key, []):
+                _add_total(t, kind, a)
     events: list = state.setdefault("events", [])
     at = now.isoformat(timespec="minutes")
     prev = since.isoformat(timespec="minutes") if since else None
@@ -1742,6 +1781,33 @@ def change_stats(changes: list[dict]) -> str:
     return f"상승 {up} · 하락 {len(diffs) - up} · 평균 {avg_txt}{tail}"
 
 
+def merge_totals(items: list[dict]) -> dict:
+    out: dict = {}
+    for t in items:
+        for k, v in (t or {}).items():
+            if k == "since":
+                out[k] = min(out.get(k, v), v)
+            else:
+                out[k] = out.get(k, 0) + v
+    return out
+
+
+def total_stats(t: dict) -> str:
+    """누계 '상승 2 · 하락 3 · 평균 ▼1,200만 (-1.8%)'."""
+    n = t.get("up", 0) + t.get("down", 0)
+    if not n:
+        return ""
+    avg, pct = t.get("diff_sum", 0) / n, t.get("pct_sum", 0) / n
+    avg_txt = f"{'▲' if avg > 0 else '▼'}{won_text(round(abs(avg)))} ({pct:+.1f}%)" if round(avg) else "0"
+    return f"상승 {t.get('up', 0)} · 하락 {t.get('down', 0)} · 평균 {avg_txt}"
+
+
+def total_counts(t: dict) -> str:
+    """요약표용 누계 '▲1 ▼2' (없으면 '0')."""
+    up, down = t.get("up", 0), t.get("down", 0)
+    return " ".join(x for x in (f"▲{up}" if up else "", f"▼{down}" if down else "") if x) or "0"
+
+
 def format_briefing(reports: list[dict], label: str, now: datetime,
                     since: datetime | None = None) -> tuple[str, str, str]:
     """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문).
@@ -1753,13 +1819,12 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
     n_new, n_chg, n_gone = (sum(len(r.get(k, [])) for r in ok) for k in ("new", "changes", "gone"))
     all_stats = change_stats([c for r in ok for c in r.get("changes", [])])
 
-    def week_of(r: dict, kind: str) -> list:
-        return [e["item"] for e in r.get("week") or [] if e["kind"] == kind]
-    w_new, w_gone = (sum(len(week_of(r, k)) for r in reports) for k in ("new", "gone"))
-    w_changes = [c for r in reports for c in week_of(r, "change")]
-    w_stats = change_stats(w_changes)
-    week_line = (f"최근 7일: 신규 {w_new} · 가격변동 {len(w_changes)}"
-                 + (f" ({w_stats})" if w_stats else "") + f" · 사라짐 {w_gone}")
+    total = merge_totals([r.get("totals") or {} for r in reports])
+    t_stats = total_stats(total)
+    started = f" ({md(total['since'])}부터)" if total.get("since") else ""
+    total_line = (f"누계{started}: "
+                  f"신규 {total.get('new', 0)} · 가격변동 {total.get('changes', 0)}"
+                  + (f" ({t_stats})" if t_stats else "") + f" · 사라짐 {total.get('gone', 0)}")
     day = time_label(now)  # 하루 여러 번 받아도 구분되게
     if since and not SHOW_TIME:
         window = f"{md(since)} ~ {md(now)}"
@@ -1791,23 +1856,24 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
         + (f" ({esc(window)} 사이)" if window else "")
         + f': 신규 {n_new} · 가격변동 {n_chg}'
         + (f" ({esc(all_stats)})" if all_stats else "") + f' · 사라짐 {n_gone}<br>'
-        f'{esc(week_line)}<br>'
+        f'{esc(total_line)}<br>'
         '단지 이름을 누르면 네이버 부동산 매물 목록이 열립니다. 놓친 변동은 단지별 "최근 7일 변동"에 있습니다.</div>',
         '<table width="100%" cellpadding="4" style="border-collapse:collapse;font-size:12px;'
         'margin-bottom:8px;width:100%">',
         '<tr style="background:#f1f3f4;white-space:nowrap"><th align="left" rowspan="2">단지</th>'
         '<th rowspan="2">매물</th><th colspan="3">이번</th>'
-        '<th colspan="3" style="border-left:1px solid #dadce0">최근 7일</th></tr>'
+        '<th colspan="3" style="border-left:1px solid #dadce0">누계</th></tr>'
         '<tr style="background:#f1f3f4;white-space:nowrap;font-weight:400"><th>신규</th><th>변동</th>'
         '<th>사라짐</th><th style="border-left:1px solid #dadce0">신규</th><th>변동</th><th>사라짐</th></tr>',
     ]
-    text.insert(1, week_line)
+    text.insert(1, total_line)
     if window:
         text.insert(1, f"이번 변동: {window} 사이")
     if all_stats:
         text.insert(1, f"가격 변동: {all_stats}")
     for r in reports:
-        week = [str(len(week_of(r, "new"))), change_counts(week_of(r, "change")), str(len(week_of(r, "gone")))]
+        t = r.get("totals") or {}
+        week = [str(t.get("new", 0)), total_counts(t), str(t.get("gone", 0))]
         cells = ([("조회 실패", 4)] if r["status"] == "failed" else
                  [(str(len(r.get("listings", []))), 1), (str(len(r.get("new", []))), 1),
                   (change_counts(r.get("changes", [])), 1), (str(len(r.get("gone", []))), 1)])
@@ -2190,7 +2256,8 @@ def main() -> int:
         for no, name in complexes.items():
             r = dict(reports.get(no) or {"status": "failed", "error": abort or "조회하지 못했습니다"},
                      no=no, name=name, week=recent_events(state, no, now),
-                     info=complex_details(state, config, no))
+                     info=complex_details(state, config, no),
+                     totals=(state.get("totals") or {}).get(no))
             # 지난 메일 이후 여러 번 조회했으면 아직 메일로 안 보낸 변동을 모두 담는다
             pending = [e for e in r["week"] if not e.get("mailed")][::-1]
             multi = len({e["at"] for e in pending}) > 1

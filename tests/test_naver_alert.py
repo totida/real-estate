@@ -652,6 +652,26 @@ class BriefingTest(unittest.TestCase):
         na.log_events(state, {}, datetime(2026, 10, 20, 8, tzinfo=na.KST), t1)
         self.assertEqual([e["complexNo"] for e in state["events"]], ["7", "8"])
 
+    def test_totals_accumulate_past_event_window(self):
+        state = {"tracked": {"a": {"complexNo": "7", "first_seen": "2026-09-20"}}}
+        up = dict(art(1, "7"), old_price_won=500_000_000, price_won=550_000_000)
+        down = dict(art(2, "7"), old_price_won=600_000_000, price_won=570_000_000)
+        follow = dict(down, counts=False)  # 최저가 안 바뀐 변동: 건수만, 상승·하락 통계 제외
+        t0 = datetime(2026, 10, 1, 10, tzinfo=na.KST)
+        na.log_events(state, {"7": {"new": [art(3, "7")], "changes": [up]}}, t0, None)
+        for d in range(1, 30):  # 한 달 동안 매일 실행 → 14일 넘은 변동 기록은 지워져도 누계는 남음
+            rep = {"7": {"changes": [down, follow]} if d == 20 else {}, "8": {"gone": [art(4, "8")]} if d == 25 else {}}
+            na.log_events(state, rep, t0 + timedelta(days=d), t0)
+        t = state["totals"]["7"]
+        self.assertEqual(t["since"], "2026-09-20")  # 처음 추적한 날
+        self.assertEqual((t["new"], t["changes"], t["up"], t["down"]), (1, 3, 1, 1))
+        self.assertEqual(state["totals"]["8"]["gone"], 1)
+        self.assertEqual(na.total_stats(t), "상승 1 · 하락 1 · 평균 ▲1,000만 (+2.5%)")
+        self.assertEqual(na.total_counts(t), "▲1 ▼1")
+        self.assertEqual(na.total_counts({}), "0")
+        merged = na.merge_totals([t, state["totals"]["8"]])
+        self.assertEqual((merged["since"], merged["gone"], merged["new"]), ("2026-09-20", 1, 1))
+
     def test_briefing_week_and_window(self):
         now = datetime(2026, 10, 3, 13, tzinfo=na.KST)
         week = [{"at": "2026-10-03T08:00+09:00", "kind": "change", "complexNo": "7",
@@ -667,17 +687,21 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("이번 변동: 오전 8시 ~ 오후 1시 사이", text)  # 같은 날이면 날짜 생략
         self.assertIn("이번 변동 없음", text)
         self.assertIn("최근 7일 변동 2건", body)
-        # 맨 위 요약에도 7일 기준 신규·변동·사라짐
-        self.assertIn("최근 7일: 신규 0 · 가격변동 1 (상승 0 · 하락 1 · 평균 ▼3,000만 (-4.8%)) · 사라짐 1", text)
-        self.assertIn("최근 7일: 신규 0 · 가격변동 1", body)
-        self.assertIn('<th colspan="3" style="border-left:1px solid #dadce0">최근 7일</th>', body)
-        row = body[body.index('서면아이파크2단지</a></td>'):]
+        # 맨 위 요약·요약표는 누계 (아래 단지별 '최근 7일 변동' 목록은 그대로)
+        totals = na._seed_totals({"events": week}, "2026-10-03")
+        r = dict(r, totals=totals["7"])
+        _, ttext, tbody = na.format_briefing([r], "25~26평", now)
+        self.assertIn("누계 (10/2부터): 신규 0 · 가격변동 1 (상승 0 · 하락 1 · 평균 ▼3,000만 (-4.8%)) · 사라짐 1",
+                      ttext)
+        self.assertIn('<th colspan="3" style="border-left:1px solid #dadce0">누계</th>', tbody)
+        row = tbody[tbody.index('서면아이파크2단지</a></td>'):]
         row = row[:row.index("</tr>")]
         self.assertEqual(re.findall(r">([^<>]*)</td>", row)[1:], ["0", "0", "0", "0", "0", "▼1", "1"])
+        self.assertIn("최근 7일 변동 2건", tbody)
         failed = dict(r, status="failed", error="429")
         _, _, fbody = na.format_briefing([failed], "25~26평", now)
         self.assertIn('colspan=4 style="white-space:nowrap">조회 실패</td>', fbody)
-        self.assertIn(">▼1</td>", fbody)  # 조회 실패여도 7일 기록은 보임
+        self.assertIn(">▼1</td>", fbody)  # 조회 실패여도 누계는 보임
         self.assertIn("10/3 오전 8시 [가격] [매매] 6억 2,000만 → 5억 9,000만 (▼3,000만)", text)
         self.assertIn("10/2 오후 8시 [사라짐] [매매] 5억 7,000만", text)
         self.assertIn('href="https://fin.land.naver.com/articles/5"', body)
