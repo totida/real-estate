@@ -2169,6 +2169,7 @@ def main() -> int:
     wanted = lambda a: matches_pyeong(a, pyeongs)  # noqa: E731
     ok = 0
     abort = ""
+    blocked = False
     # 감시 대상에서 빠진 단지·거래유형(예: 매매만 보기로 바꾼 뒤의 전세·월세)의 기록은 정리한다
     trades = {TRADE_NAMES.get(t, t) for t in trade_types}
     state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
@@ -2186,6 +2187,7 @@ def main() -> int:
             except (BlockedError, BrowserError) as e:
                 print(f"경고: {name} ({no}) 조회 실패, 나머지 단지도 건너뜁니다: {e}", file=sys.stderr)
                 abort = str(e)
+                blocked = isinstance(e, BlockedError)
                 break
             except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
                 print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
@@ -2226,6 +2228,13 @@ def main() -> int:
 
     if not ok:
         print("매물을 조회한 단지가 없습니다.")
+        # --retry-later: 크로미움 실패 등으로 전부 실패하면 실패 메일 대신 다시 조회하도록 알린다 (기록도 안 바꿈).
+        # 429(요청 과다)는 바로 다시 조회하면 안 되므로 그대로 실패 메일을 보낸다.
+        mail_hours = [int(x) for x in config.get("mail_hours") or []]
+        if ("--retry-later" in sys.argv[1:] and not blocked and mail_configured()
+                and (not mail_hours or now.hour in mail_hours or "--mail-now" in sys.argv[1:])):
+            print("메일 보류: 조회가 모두 실패해 잠시 뒤 다시 조회합니다")
+            return 2
     elif new:
         title, body = format_message(new, complexes, pyeongs)
         print(title + "\n" + body)

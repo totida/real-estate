@@ -8,6 +8,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import naver_alert as na  # noqa: E402
 
+# 테스트가 실제 메일 설정(local.json·환경변수)을 읽어 진짜 메일을 보내지 않도록 막는다.
+# (탭에서 테스트를 돌리면 main() 이 실제 받는 사람에게 메일을 보냈음)
+import os, smtplib, tempfile  # noqa: E401, E402
+for _k in [k for k in os.environ if k.startswith(("SMTP_", "MAIL_", "TELEGRAM_", "GITHUB_"))]:
+    del os.environ[_k]
+na.LOCAL_PATH = Path(tempfile.mkdtemp()) / "local.json"
+
+
+def _no_real_smtp(*a, **k):
+    raise RuntimeError("테스트에서 실제 SMTP 연결 금지")
+
+
+smtplib.SMTP = smtplib.SMTP_SSL = _no_real_smtp
+
 
 def art(no, complex_no="1"):
     return {"articleNo": str(no), "complexNo": complex_no, "name": "서면아이파크1단지",
@@ -421,6 +435,34 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.run_main(fake), 1)  # 한 단지도 조회 못 함
         self.assertTrue(fake.closed)
         self.assertEqual(na.load_state()["initialized_complexes"], [])
+
+    def test_retry_later_holds_mail_when_all_fail(self):
+        import json, sys
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"fail": "A"}}))
+        mails = []
+        extra = [(na, "mail_configured", lambda: True),
+                 (na, "send_mail", lambda *a, **k: mails.append(a) or "me@example.com"),
+                 (sys, "argv", ["naver_alert.py", "--retry-later", "--mail-now"])]
+        orig = [(m, n, getattr(m, n)) for m, n, _ in extra]
+        for m, n, v in extra:
+            setattr(m, n, v)
+        try:
+            self.assertEqual(self.run_main(FakeNaver({})), 2)  # 다시 조회하라고 알림
+            self.assertEqual(mails, [])
+            self.assertFalse(self.state.exists())  # 기록은 그대로
+            # 429 는 바로 다시 조회하면 안 되므로 실패 메일을 보낸다
+            self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"blocked": "A"}}))
+            self.assertEqual(self.run_main(FakeNaver({})), 1)
+            self.assertEqual(len(mails), 1)
+            # 다시 조회에서도 실패하면(--retry-later 없음) 실패 메일을 보낸다
+            mails.clear()
+            sys.argv = ["naver_alert.py", "--mail-now"]
+            self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"fail": "A"}}))
+            self.assertEqual(self.run_main(FakeNaver({})), 1)
+            self.assertEqual(len(mails), 1)
+        finally:
+            for m, n, v in orig:
+                setattr(m, n, v)
 
     def test_complex_info_after_all_listings(self):
         self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "A", "2": "B"}}))

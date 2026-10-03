@@ -7,9 +7,19 @@ export PATH="/data/data/com.termux/files/usr/bin:$PATH"
 cd "$(dirname "$0")/.." || exit 1
 git pull -q --ff-only >/dev/null 2>&1  # 코드 자동 업데이트 (실패해도 계속)
 
-out=$(python naver_alert.py 2>&1)
+out=$(python naver_alert.py --retry-later 2>&1)
 code=$?
 { date; echo "$out"; echo; } >> ~/alert.log
+
+# 모든 단지 조회가 실패하면(크로미움이 메모리 부족으로 죽는 등) 실패 메일 대신 10분 뒤 한 번 더 조회한다.
+# 다른 크로미움(쇼핑 브리핑 등)이 떠 있으면 끝날 때까지 최대 10분 더 기다린다. 두 번째도 실패하면 실패 메일.
+if [ "$code" -eq 2 ]; then
+  sleep 600
+  for _ in $(seq 60); do pgrep -f chromium >/dev/null || break; sleep 10; done
+  out=$(python naver_alert.py --mail-now 2>&1)
+  code=$?
+  { date; echo "(다시 조회)"; echo "$out"; echo; } >> ~/alert.log
+fi
 
 # 🏠 새 매물 / 📉 사라진 매물 부분만 잘라낸다
 section() { echo "$out" | awk -v m="$1" 'index($0, m) == 1 {f = 1; next} /^(🏠|📉|알림 전송)/ {f = 0} f'; }
