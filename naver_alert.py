@@ -2169,7 +2169,6 @@ def main() -> int:
     wanted = lambda a: matches_pyeong(a, pyeongs)  # noqa: E731
     ok = 0
     abort = ""
-    info_blocked = False
     # 감시 대상에서 빠진 단지·거래유형(예: 매매만 보기로 바꾼 뒤의 전세·월세)의 기록은 정리한다
     trades = {TRADE_NAMES.get(t, t) for t in trade_types}
     state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
@@ -2193,13 +2192,6 @@ def main() -> int:
                 reports[no] = {"status": "failed", "error": str(e)}
                 continue
             ok += 1
-            if not info_blocked:
-                try:
-                    if update_complex_info(state, naver, no, today):
-                        time.sleep(1.5)
-                except BlockedError as e:
-                    print(f"경고: 단지 정보 조회가 막혀 나머지 단지 정보는 건너뜁니다: {e}", file=sys.stderr)
-                    info_blocked = True
             fresh = diff_and_update(state, items, now)
             changes: list[dict] = []
             relisted: set = set()
@@ -2220,6 +2212,14 @@ def main() -> int:
                 print(f"{name} ({no}): 매물 {len(items)}건 기준 저장 (첫 조회, 알림 없음)")
                 report["status"] = "first"
             reports[no] = report
+        # 단지 정보(준공년월·세대수 등)는 매물 조회를 모두 마친 뒤에 받는다 → 이 요청 때문에 매물 조회가 막히지 않게
+        for no in [n for n, r in reports.items() if r["status"] != "failed"] if not abort else []:
+            try:
+                if update_complex_info(state, naver, no, today):
+                    time.sleep(1.5)
+            except BlockedError as e:
+                print(f"경고: 단지 정보 조회가 막혀 나머지 단지 정보는 건너뜁니다: {e}", file=sys.stderr)
+                break
     finally:
         naver.close()
     state["initialized_complexes"] = sorted(initialized)
@@ -2248,7 +2248,7 @@ def main() -> int:
     SHOW_TIME = bool(config.get("show_time", True))
     SORT_ORDER = list(config.get("sort") or ["price", "dong", "-floor"])
     mail_hours = [int(x) for x in config.get("mail_hours") or []]
-    if mail_configured() and mail_hours and now.hour not in mail_hours:
+    if mail_configured() and mail_hours and now.hour not in mail_hours and "--mail-now" not in sys.argv[1:]:
         print(f"메일 전송 생략: 브리핑 시간({', '.join(map(str, mail_hours))}시)이 아님")
     elif mail_configured():
         last_mail = parse_time(state.get("last_mail"))

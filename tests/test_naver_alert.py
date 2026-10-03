@@ -422,6 +422,29 @@ class MainTest(unittest.TestCase):
         self.assertTrue(fake.closed)
         self.assertEqual(na.load_state()["initialized_complexes"], [])
 
+    def test_complex_info_after_all_listings(self):
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "A", "2": "B"}}))
+        order = []
+
+        class Naver(FakeNaver):
+            def articles(self, no, trade_types):
+                order.append(("articles", no))
+                return super().articles(no, trade_types)
+
+            def complex_info(self, no):
+                order.append(("info", no))
+                return {"totalHouseholdNumber": 100}
+        self.run_main(Naver({"1": [art(1)], "2": [art(2, "2")]}))
+        self.assertEqual(order, [("articles", "1"), ("articles", "2"), ("info", "1"), ("info", "2")])
+        self.run_main(Naver({"1": [art(1)], "2": [art(2, "2")]}))
+        self.assertEqual(order.count(("info", "1")), 1)  # 한 번 받으면 한 달 동안 다시 안 받음
+        self.assertEqual(na.load_state()["complex_info"]["1"]["households"], 100)
+        # 매물 조회가 막히면 단지 정보는 요청하지 않는다
+        order.clear()
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"9": "C", "blocked": "D"}}))
+        self.run_main(Naver({"9": [art(3, "9")]}))
+        self.assertNotIn(("info", "9"), order)
+
     def test_complexes_only_skips_search(self):
         import json
         self.cfg.write_text(json.dumps(
@@ -488,9 +511,7 @@ class MainTest(unittest.TestCase):
         self.assertIn("8억 → 7억", html_body)
         self.assertIn("조회 실패", html_body)  # 차단된 단지도 브리핑에 표시
         self.assertIn("최근 7일 변동 2건", html_body)  # 신규 1 + 가격 1, 확인 시각과 함께
-        self.assertIn("2014년 6월 준공", html_body)  # 단지 기본 정보
-        self.assertIn("1,384세대 · 부산시 부산진구 전포동", html_body)
-        self.assertEqual(fake.info_calls, ["1"])  # 단지 정보는 한 번만 받는다 (한 달 주기)
+        self.assertEqual(fake.info_calls, [])  # 네이버가 막은 날은 단지 정보를 요청하지 않는다
         self.assertEqual(len(na.load_state()["events"]), 2)
 
     def run_at(self, fake, hour):
@@ -527,6 +548,17 @@ class MainTest(unittest.TestCase):
             na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
         msgs = [m[1] for m in FakeSMTP.sent if m[0] == "msg"]
         self.assertEqual(len(msgs), 1)  # 10시에만
+        # --mail-now: 브리핑 시간이 아니어도 다시 조회해서 바로 메일
+        orig_argv = sys.argv
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.smtplib.SMTP_SSL = FakeSMTP
+        sys.argv = ["naver_alert.py", "--mail-now"]
+        try:
+            self.run_at(fake, 15)
+        finally:
+            sys.argv = orig_argv
+            na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
+        self.assertEqual(len([m for m in FakeSMTP.sent if m[0] == "msg"]), 2)
         self.assertEqual(msgs[0]["To"], "a@example.com, b@example.com")
         self.assertIn("신규 1 · 가격변동 1", msgs[0]["Subject"])  # 9시 신규도 10시 메일에
         body = msgs[0].get_body(("html",)).get_content()
