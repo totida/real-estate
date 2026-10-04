@@ -39,7 +39,7 @@ F-Droid 에서 **Termux**, **Termux:API**, **Termux:Boot** 를 설치하고
 pkg update -y && pkg upgrade -y
 pkg install -y tur-repo x11-repo
 pkg install -y python git termux-api cronie termux-services chromium xorg-xserver-xvfb
-git clone https://github.com/totida/real-estate.git
+git clone -b main https://github.com/totida/real-estate.git   # 기본 브랜치가 옛 버전이라 -b main 필수
 cd ~/real-estate && python naver_alert.py      # 첫 실행: 단지별 "기준 저장" 이 나오면 성공
 ```
 
