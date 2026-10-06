@@ -34,5 +34,6 @@
 - `README.md` — 설치·설정 사용법
 
 ## TODO
+- 다음 조회 실패 때 `state/browser-fail/` 최신 기록으로 `Failed to fetch` 원인 확인 (메모리 부족 추정)
 - 10/4~10/5 탭 cron 정지 원인 미확인 (쇼핑도 같이 멈춤 → 탭 전체 문제라 별도 세션에서)
 - GitHub 저장소 Settings → Default branch를 `main`으로 바꾸기

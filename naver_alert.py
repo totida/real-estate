@@ -32,6 +32,9 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 STATE_PATH = ROOT / "state" / "seen.json"
 HISTORY_PATH = ROOT / "state" / "history.csv"
+# 조회가 실패한 순간의 브라우저 상태 (크로미움 임시 폴더는 끝나면 지워져서 원인을 따로 남긴다)
+BROWSER_FAIL_DIR = ROOT / "state" / "browser-fail"
+BROWSER_FAIL_KEEP = 10
 # 메일·텔레그램 계정 같은 비밀값. 저장소가 공개라 git 에 올리지 않는다 (.gitignore).
 LOCAL_PATH = ROOT / "local.json"
 
@@ -243,6 +246,63 @@ def open_browser() -> "Chromium":
     return Chromium(exe, xvfb=True)
 
 
+def memory_text() -> str:
+    """'남은 메모리 370MB · 스왑 2047/2047MB 사용' (읽지 못하면 빈 문자열)."""
+    try:
+        info = dict(line.split(":", 1) for line in Path("/proc/meminfo").read_text().splitlines()
+                    if ":" in line)
+        mb = {k: int(info[k].split()[0]) // 1024 for k in ("MemAvailable", "SwapTotal", "SwapFree")}
+    except (OSError, KeyError, ValueError, IndexError):
+        return ""
+    return (f"남은 메모리 {mb['MemAvailable']}MB · "
+            f"스왑 {mb['SwapTotal'] - mb['SwapFree']}/{mb['SwapTotal']}MB 사용")
+
+
+def process_tree(root: int) -> list[str]:
+    """root 와 그 아래 프로세스 '번호 종류 메모리' 목록.
+
+    크로미움은 통신(network)·화면(renderer) 등을 따로 된 프로세스로 돌린다. 메모리가 모자라면 안드로이드가
+    그중 하나만 끌 수 있어서, 실패했을 때 어느 프로세스가 살아 있었는지 남긴다.
+    """
+    procs: dict = {}
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            ppid = int((d / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            args = (d / "cmdline").read_bytes().decode(errors="replace").split("\0")
+            rss = re.search(r"VmRSS:\s*(\d+)", (d / "status").read_text())
+        except (OSError, ValueError, IndexError):
+            continue
+        kind = next((a.split("=", 1)[1] for a in args if a.startswith("--utility-sub-type=")),
+                    next((a.split("=", 1)[1] for a in args if a.startswith("--type=")), "본체"))
+        procs[int(d.name)] = (ppid, kind, int(rss.group(1)) // 1024 if rss else 0)
+    out, todo = [], [root]
+    while todo:
+        pid = todo.pop(0)
+        if pid in procs:
+            out.append(f"{pid} {procs[pid][1]} {procs[pid][2]}MB")
+        todo += sorted(p for p, v in procs.items() if v[0] == pid)
+    return out
+
+
+def save_browser_failure(naver, error: str) -> None:
+    """조회가 처음 실패한 순간의 브라우저 상태를 BROWSER_FAIL_DIR 에 남긴다 (최근 BROWSER_FAIL_KEEP 개).
+    기록 저장에 실패해도 조회는 계속한다."""
+    try:
+        now = datetime.now(KST)
+        report = naver.failure_report()
+        BROWSER_FAIL_DIR.mkdir(parents=True, exist_ok=True)
+        path = BROWSER_FAIL_DIR / f"{now:%Y%m%d-%H%M%S}.log"
+        path.write_text(f"{now:%Y-%m-%d %H:%M:%S} 첫 실패: {error}\n{memory_text()}\n{report}\n",
+                        encoding="utf-8")
+        for old in sorted(BROWSER_FAIL_DIR.glob("*.log"))[:-BROWSER_FAIL_KEEP]:
+            old.unlink()
+        print(f"브라우저 실패 기록: {path}")
+    except Exception as e:  # noqa: BLE001
+        print(f"경고: 브라우저 실패 기록 저장 실패: {e}", file=sys.stderr)
+
+
 class Chromium:
     """크로미움 한 개와 페이지 한 개를 DevTools 로 조종한다."""
 
@@ -250,6 +310,7 @@ class Chromium:
                  start_timeout: float = 60) -> None:
         self.profile = Path(tempfile.mkdtemp(prefix="naver-alert-chrome-"))
         self.log = open(self.profile / "chrome.log", "wb")
+        self.notes: list[str] = []  # 페이지 콘솔 오류 (net::ERR_… 등), 실패 기록용
         self.xvfb: subprocess.Popen | None = None
         self.proc: subprocess.Popen | None = None
         self.ws: _WebSocket | None = None
@@ -304,6 +365,10 @@ class Chromium:
         self.call("Page.addScriptToEvaluateOnNewDocument", {
             "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"},
             page=True)
+        try:
+            self.call("Log.enable", page=True)  # 콘솔 오류(net::ERR_… 등)를 실패 기록에 남기려고
+        except RuntimeError:
+            pass
 
     def call(self, method: str, params: dict | None = None, page: bool = False,
              timeout: float = 60) -> dict:
@@ -315,6 +380,11 @@ class Chromium:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             reply = json.loads(self.ws.recv())
+            if reply.get("method") == "Log.entryAdded":
+                e = (reply.get("params") or {}).get("entry") or {}
+                if e.get("level") in ("error", "warning"):
+                    note = f"{e['level']} [{e.get('source', '')}] {e.get('text', '')} {e.get('url', '')}"
+                    self.notes = (self.notes + [note.strip()[:300]])[-30:]
             if reply.get("id") == self._id:
                 if "error" in reply:
                     raise RuntimeError(f"{method}: {reply['error'].get('message')}")
@@ -363,6 +433,29 @@ class Chromium:
         out = self.evaluate(js)
         return out["status"], out["text"]
 
+    def failure_report(self) -> str:
+        """조회 실패 때의 브라우저 상태: 페이지·프로세스·콘솔 오류·크로미움 출력 끝부분."""
+        lines = []
+        try:
+            res = self.call("Runtime.evaluate", {
+                "expression": "JSON.stringify({href: location.href, ready: document.readyState,"
+                              " online: navigator.onLine})", "returnByValue": True},
+                page=True, timeout=10)
+            lines.append(f"페이지: {(res.get('result') or {}).get('value')}")
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"페이지 상태 확인 실패: {e}")
+        if self.proc:
+            alive = "살아 있음" if self.proc.poll() is None else f"종료됨 (코드 {self.proc.returncode})"
+            lines.append(f"크로미움 프로세스 ({alive}):")
+            lines += [f"  {p}" for p in process_tree(self.proc.pid)]
+        lines.append("콘솔 오류:")
+        lines += [f"  {n}" for n in self.notes] or ["  (없음)"]
+        try:
+            tail = (self.profile / "chrome.log").read_bytes()[-20000:].decode(errors="replace")
+        except OSError:
+            tail = ""
+        return "\n".join(lines + ["--- 크로미움 출력 (끝 20KB) ---", tail])
+
     def close(self) -> None:
         if self.ws:
             try:
@@ -400,6 +493,7 @@ class NaverLand:
         self.fin = fin or self.FIN
         self._token: str | None = None
         self._browser: Chromium | None = None
+        self._open_failure = ""  # 브라우저·지도 페이지 열기 실패 때의 상태 (그 브라우저는 이미 닫힘)
 
     def _new_headers(self) -> dict:
         h = {"Referer": f"{self.NEW}/complexes", "Accept": "application/json"}
@@ -428,6 +522,7 @@ class NaverLand:
             try:
                 browser = open_browser()
             except Exception as e:
+                self._open_failure = f"브라우저 실행 실패: {e}"
                 raise BrowserError(str(e)) from e
             try:
                 browser.goto(self.fin + self.START_PAGE)
@@ -436,10 +531,16 @@ class NaverLand:
                 if origin != self.fin:
                     raise RuntimeError(f"지도 페이지가 다른 주소로 이동했습니다: {origin}")
             except Exception as e:
+                self._open_failure = browser.failure_report()
                 browser.close()
                 raise BrowserError(f"fin.land 페이지 열기 실패: {e}") from e
             self._browser = browser
         return self._browser
+
+    def failure_report(self) -> str:
+        if self._browser:
+            return self._browser.failure_report()
+        return self._open_failure or "브라우저가 열려 있지 않음"
 
     def fetch_page(self, complex_no: str, trade_types: list[str], last_info: list) -> dict:
         """매물 목록 한 페이지(result)."""
@@ -2172,6 +2273,7 @@ def main() -> int:
     ok = 0
     abort = ""
     blocked = False
+    fail_saved = False  # 브라우저 실패 기록은 실행마다 첫 실패 때 한 번만
     # 감시 대상에서 빠진 단지·거래유형(예: 매매만 보기로 바꾼 뒤의 전세·월세)의 기록은 정리한다
     trades = {TRADE_NAMES.get(t, t) for t in trade_types}
     state["tracked"] = {k: t for k, t in (state.get("tracked") or {}).items()
@@ -2190,10 +2292,15 @@ def main() -> int:
                 print(f"경고: {name} ({no}) 조회 실패, 나머지 단지도 건너뜁니다: {e}", file=sys.stderr)
                 abort = str(e)
                 blocked = isinstance(e, BlockedError)
+                if not blocked and not fail_saved:
+                    save_browser_failure(naver, f"{name} ({no}) {e}")
                 break
             except Exception as e:  # noqa: BLE001  한 단지 실패가 전체를 막지 않도록
                 print(f"경고: {name} ({no}) 조회 실패: {e}", file=sys.stderr)
                 reports[no] = {"status": "failed", "error": str(e)}
+                if not fail_saved:
+                    save_browser_failure(naver, f"{name} ({no}) {e}")
+                    fail_saved = True
                 continue
             ok += 1
             fresh = diff_and_update(state, items, now)

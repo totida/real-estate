@@ -14,6 +14,7 @@ import os, smtplib, tempfile  # noqa: E401, E402
 for _k in [k for k in os.environ if k.startswith(("SMTP_", "MAIL_", "TELEGRAM_", "GITHUB_"))]:
     del os.environ[_k]
 na.LOCAL_PATH = Path(tempfile.mkdtemp()) / "local.json"
+na.BROWSER_FAIL_DIR = Path(tempfile.mkdtemp()) / "browser-fail"  # 실제 state/ 에 실패 기록을 쓰지 않게
 
 
 def _no_real_smtp(*a, **k):
@@ -389,6 +390,9 @@ class FakeNaver:
         return {"complexNumber": no, "totalHouseholdNumber": 1384, "useApprovalDate": "20140630",
                 "address": {"city": "부산시", "division": "부산진구", "sector": "전포동"}}
 
+    def failure_report(self):
+        return "가짜 브라우저 상태"
+
     def close(self):
         self.closed = True
 
@@ -409,6 +413,7 @@ class MainTest(unittest.TestCase):
             (na.time, "sleep", lambda s: None),
             (na, "NaverLand", na.NaverLand),
             (na, "HISTORY_PATH", self.tmp / "history.csv"),
+            (na, "BROWSER_FAIL_DIR", self.tmp / "browser-fail"),
         ]
         self.orig = [(m, n, getattr(m, n)) for m, n, _ in self.patches]
         for m, n, v in self.patches:
@@ -435,6 +440,36 @@ class MainTest(unittest.TestCase):
         self.assertEqual(self.run_main(fake), 1)  # 한 단지도 조회 못 함
         self.assertTrue(fake.closed)
         self.assertEqual(na.load_state()["initialized_complexes"], [])
+
+    def test_browser_failure_saved_once_per_run(self):
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"fail": "A", "1": "B"}}))
+        self.run_main(FakeNaver({"1": [art(1)]}))
+        logs = list((self.tmp / "browser-fail").glob("*.log"))
+        self.assertEqual(len(logs), 1)
+        text = logs[0].read_text(encoding="utf-8")
+        self.assertIn("첫 실패: A (fail) boom", text)
+        self.assertIn("가짜 브라우저 상태", text)
+        # 429 는 브라우저 문제가 아니라 기록하지 않는다
+        logs[0].unlink()
+        self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"blocked": "A"}}))
+        self.run_main(FakeNaver({}))
+        self.assertEqual(list((self.tmp / "browser-fail").glob("*.log")), [])
+
+    def test_browser_failure_keeps_latest_and_never_raises(self):
+        d = self.tmp / "browser-fail"
+        d.mkdir()
+        for i in range(12):
+            (d / f"20260901-0000{i:02d}.log").write_text("old")
+        na.save_browser_failure(FakeNaver({}), "x")
+        logs = sorted(p.name for p in d.glob("*.log"))
+        self.assertEqual(len(logs), na.BROWSER_FAIL_KEEP)
+        self.assertNotIn("20260901-000000.log", logs)
+        self.assertNotEqual(logs[-1][:8], "20260901")  # 새 기록은 남음
+
+        class Broken:
+            def failure_report(self):
+                raise RuntimeError("상태 못 읽음")
+        na.save_browser_failure(Broken(), "x")  # 기록 실패가 조회를 막지 않음
 
     def test_retry_later_holds_mail_when_all_fail(self):
         import json, sys
@@ -973,6 +1008,9 @@ class ChromiumIntegrationTest(unittest.TestCase):
                 payload = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 requests.append((self.path, payload, self.headers.get("user-agent", "")))
                 page = len(requests)
+                if payload["complexNumber"] == "drop":  # 응답 없이 끊음 → 브라우저에서 Failed to fetch
+                    self.close_connection = True
+                    return
                 if payload["complexNumber"] == "bad":
                     body = b'{"isSuccess": false, "detailCode": "ERR"}'
                     self.send_response(200)
@@ -1013,6 +1051,20 @@ class ChromiumIntegrationTest(unittest.TestCase):
                 naver.articles("bad", ["A1"])
         finally:
             naver.close()
+
+    def test_failure_report_after_failed_fetch(self):
+        naver = na.NaverLand(fin=self.base)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Failed to fetch"):
+                naver.articles("drop", ["A1"])
+            report = naver.failure_report()
+        finally:
+            naver.close()
+        self.assertIn(f'페이지: {{"href":"{self.base}/map","ready":"complete","online":true}}', report)
+        self.assertIn("크로미움 프로세스 (살아 있음):", report)
+        self.assertIn(" 본체 ", report)
+        self.assertIn("net::ERR_EMPTY_RESPONSE", report)  # 콘솔 오류로 끊긴 이유가 남음
+        self.assertIn("--- 크로미움 출력", report)
 
     def test_check_brokers(self):
         import contextlib
