@@ -6,7 +6,8 @@
 
 ## 현재 상태
 - 탭 Termux cron 매일 10:00 → `termux/run-alert.sh` → `naver_alert.py` (실행마다 `git pull`)
-- 2026-10-05: 탭이 원격지에서 꺼져 멈춘 상태. 다른 실행 위치를 찾았지만 막혀서 탭 유지로 결정.
+- 10/4 낮~10/5 15:45 탭 cron 전체가 멈췄다가 다시 돎. 다른 실행 위치는 막혀서 탭 유지로 결정.
+- 10/6 10:01 첫 조회 전부 `Failed to fetch` → 10분 뒤 자동 재조회 성공, 메일 정상 발송.
 
 ## 핵심 결정사항
 - **한국 IP + 실제 브라우저**여야 조회된다. Termux 크로미움을 화면 없이 띄워
@@ -22,6 +23,10 @@
 - **테스트가 실제 메일을 보내면 안 된다.** 테스트 파일 맨 위의 막음(`LOCAL_PATH` 임시 경로,
   메일 환경변수 제거, `smtplib` 차단)을 풀지 말 것. 10/3에 실제로 시험 메일이 나갔다.
 - 비밀값(Gmail 앱 비밀번호 등)은 탭의 `local.json`에만 둔다. 저장소·대화에 남기지 않는다.
+- 탭 Claude 세션(proot)은 `~` 가 `/root` 라서 Termux 홈 파일이 안 보인다. 실행 기록은
+  `/data/data/com.termux/files/home/alert.log`, push 는 `HOME=/data/data/com.termux/files/home` 를 붙여서
+  (gh 로그인 정보가 Termux 홈에 있음). 파이썬도 Termux 것(`$PREFIX/bin` 을 PATH 앞에)으로.
+- 메일·기록 변경 없이 네이버 조회만 점검: `python naver_alert.py --check-brokers 133976` (한 번만, 반복 금지)
 - 작업이 마무리되거나 대화가 길어지면 project-wrapup 스킬로 정리할지 먼저 물어볼 것.
 
 ## 문서 (필요할 때만 읽을 것)
@@ -29,5 +34,5 @@
 - `README.md` — 설치·설정 사용법
 
 ## TODO
-- 탭 다시 켜기 → `tail ~/alert.log`로 10시 실행 확인 (Termux:Boot가 crond·wake-lock을 다시 켜는지)
+- 10/4~10/5 탭 cron 정지 원인 미확인 (쇼핑도 같이 멈춤 → 탭 전체 문제라 별도 세션에서)
 - GitHub 저장소 Settings → Default branch를 `main`으로 바꾸기
