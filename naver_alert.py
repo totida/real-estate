@@ -1878,7 +1878,9 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                  [(str(len(r.get("listings", []))), 1), (str(len(r.get("new", []))), 1),
                   (change_counts(r.get("changes", [])), 1), (str(len(r.get("gone", []))), 1)])
         cells += [(c, 1) for c in week]
-        h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}</td>'
+        hh = _info_count((r.get("info") or {}).get("households"))  # 단지 이름 옆에 세대수
+        hh_html = f' <span style="color:#5f6368;white-space:nowrap">{hh:,}세대</span>' if hh else ""
+        h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}{hh_html}</td>'
                  + "".join(f'<td align="center"{f" colspan={n}" if n > 1 else ""} style="white-space:nowrap'
                            + (';border-left:1px solid #e0e0e0' if i == len(cells) - 3 else "")
                            + f'">{esc(c)}</td>' for i, (c, n) in enumerate(cells)) + "</tr>")

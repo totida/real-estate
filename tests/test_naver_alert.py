@@ -710,6 +710,20 @@ class BriefingTest(unittest.TestCase):
         self.assertIn("첫 조회", text)
         self.assertIn("조회 실패: 429", text)
 
+    def test_summary_shows_households(self):
+        reports = [{"no": "7", "name": "서면아이파크2단지", "status": "ok", "listings": [], "new": [],
+                    "changes": [], "gone": [], "info": {"households": 1384}},
+                   {"no": "8", "name": "연산더샵", "status": "failed", "error": "429",
+                    "info": {"households": "1,071"}},
+                   {"no": "9", "name": "양정", "status": "ok", "listings": [], "new": [], "changes": [],
+                    "gone": []}]
+        _, _, body = na.format_briefing(reports, "25평", datetime(2026, 10, 7, 10, tzinfo=na.KST))
+        table = body.split("</table>")[0]
+        self.assertIn('>서면아이파크2단지</a> <span style="color:#5f6368;white-space:nowrap">1,384세대</span></td>',
+                      table)
+        self.assertIn(">1,071세대</span>", table)  # 조회 실패한 단지도 세대수는 보임
+        self.assertIn(">양정</a></td>", table)  # 세대수를 모르면 이름만
+
     def test_events_window(self):
         state = {}
         t0 = datetime(2026, 10, 1, 8, tzinfo=na.KST)
