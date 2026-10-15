@@ -757,8 +757,9 @@ def complex_url(complex_no: str) -> str:
 
 INFO_REFRESH_DAYS = 30  # 준공년월·세대수는 거의 안 바뀌므로 한 달에 한 번만 다시 받는다
 INFO_RETRY_DAYS = 7  # 받지 못했으면 일주일 뒤 다시 시도
-INFO_VERSION = 2  # 읽는 항목이 늘면 올린다 → 저장된 정보를 기다리지 않고 바로 다시 받음
-INFO_KEYS = ("built", "households", "dongs", "address", "builder", "top_floor", "parking", "far")
+INFO_VERSION = 3  # 읽는 항목이 늘면 올린다 → 저장된 정보를 기다리지 않고 바로 다시 받음
+INFO_KEYS = ("built", "households", "dongs", "address", "builder", "top_floor", "parking", "far",
+             "pyeong_households")
 
 
 def _info_count(v) -> int | None:
@@ -844,7 +845,57 @@ def parse_complex_info(raw: dict) -> dict:
             info.setdefault("parking", round(float(v), 2))
         elif "floorarearatio" in k and isinstance(v, (int, float)) and v > 0:
             info.setdefault("far", round(float(v)))
+    per_pyeong = parse_pyeong_households(raw)
+    if per_pyeong:
+        info["pyeong_households"] = per_pyeong
     return info
+
+
+def _dict_lists(obj):
+    """응답 안에서 항목이 dict 인 배열들 (평형별 목록 후보)."""
+    if isinstance(obj, dict):
+        for v in obj.values():
+            yield from _dict_lists(v)
+    elif isinstance(obj, list):
+        if any(isinstance(x, dict) for x in obj):
+            yield obj
+        for x in obj:
+            yield from _dict_lists(x)
+
+
+def parse_pyeong_households(raw) -> dict:
+    """평형별 목록에서 {평형(공급면적 기준, 문자열): 세대수}. 같은 평형의 여러 타입(59A·59B)은 더한다.
+
+    항목마다 공급·전용면적(supply/exclusive + space/area)과 세대수(household)가 있어야 한다.
+    그런 배열이 여럿이면 처음 읽힌 것 하나만 쓴다 (같은 목록을 두 번 세지 않게).
+    """
+    for items in _dict_lists(raw):
+        out: dict = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            leaves = [(k, v) for _, k, v in _info_leaves(item)]
+            area = {kind: next((to_float(v) for k, v in leaves
+                                if kind in k and ("space" in k or "area" in k)
+                                and "pyeong" not in k and "ratio" not in k and to_float(v)), None)
+                    for kind in ("supply", "exclusive")}
+            counts = [("total" in k, _info_count(v)) for k, v in leaves if "household" in k
+                      and not any(w in k for w in ("parking", "lease", "rent"))]
+            counts = [c for c in counts if c[1]]
+            p = pyeong_of(area)
+            if p and counts:
+                out[str(p)] = out.get(str(p), 0) + max(counts, key=lambda c: c[0])[1]
+        if out:
+            return out
+    return {}
+
+
+def size_households(info: dict | None, pyeongs: list[int] | None) -> int | None:
+    """감시하는 평형(예: 25~26평)의 세대수 합. 평형별 세대수를 모르거나 평형 조건이 없으면 None."""
+    per = (info or {}).get("pyeong_households")
+    if not pyeongs or not isinstance(per, dict):
+        return None
+    return sum(_info_count(per.get(str(p))) or 0 for p in pyeongs) or None
 
 
 def update_complex_info(state: dict, naver, complex_no: str, today: str) -> bool:
@@ -1353,7 +1404,7 @@ def mail_preview(to_self: bool = True) -> int:
                          "info": complex_details(state, config, str(no)),
                          "totals": (state.get("totals") or {}).get(str(no))})
     subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
-                                               parse_time(state.get("last_mail")))
+                                               parse_time(state.get("last_mail")), pyeongs)
     subject = subject.replace("[매물 브리핑]", "[매물 브리핑 미리보기]", 1)
     to = send_mail(subject, text, html_body,
                    [(f"매매매물_{now:%Y%m%d}.csv", listings_csv(briefing), "text/csv")], to_self=to_self)
@@ -1414,11 +1465,16 @@ def check_complex(complex_no: str | None = None) -> int:
     finally:
         naver.close()
     print(f"{complexes.get(no, no)} ({no}) 단지 정보 응답:")
-    print(json.dumps(raw, ensure_ascii=False)[:2500])
+    print(json.dumps(raw, ensure_ascii=False)[:6000])  # 평형별 목록이 뒤쪽에 있어도 보이게
     info = parse_complex_info(raw)
     print(f"읽은 값: {json.dumps(info, ensure_ascii=False)}")
     print("메일 표시: " + (complex_info_text(info, datetime.now(KST)) or "없음"))
     print("          " + (complex_extra_text(info) or "(시공사·층·주차·용적률 없음)"))
+    pyeongs = [int(p) for p in config.get("pyeong", [])]
+    size_hh = size_households(info, pyeongs)
+    print(f"평형별 세대수: {json.dumps(info.get('pyeong_households') or {}, ensure_ascii=False)}"
+          + (f" → 요약표 괄호 ({size_hh:,})" if size_hh else
+             " → ❌ 이 응답에는 평형별 세대수가 없거나 읽지 못함 (요약표 괄호 안 나옴)"))
     if not info:
         print("결과: ❌ 읽지 못했습니다. 위 응답을 알려주세요. (config.json 의 complex_info 로 직접 적을 수도 있습니다)")
     return 0
@@ -1910,10 +1966,12 @@ def total_counts(t: dict) -> str:
 
 
 def format_briefing(reports: list[dict], label: str, now: datetime,
-                    since: datetime | None = None) -> tuple[str, str, str]:
+                    since: datetime | None = None,
+                    pyeongs: list[int] | None = None) -> tuple[str, str, str]:
     """단지별 브리핑 메일 (제목, 텍스트 본문, HTML 본문).
 
     since 는 이전 브리핑 시각. 이번 변동은 그 사이에 생긴 것이다.
+    pyeongs 는 감시 평형. 요약표 세대수 옆에 그 평형의 세대수를 괄호로 붙인다.
     각 단지의 r['week'] 에 최근 7일 변동(log_events 기록)이 있으면 함께 보여준다.
     """
     ok = [r for r in reports if r["status"] != "failed"]
@@ -1979,8 +2037,13 @@ def format_briefing(reports: list[dict], label: str, now: datetime,
                  [(str(len(r.get("listings", []))), 1), (str(len(r.get("new", []))), 1),
                   (change_counts(r.get("changes", [])), 1), (str(len(r.get("gone", []))), 1)])
         cells += [(c, 1) for c in week]
-        hh = _info_count((r.get("info") or {}).get("households"))  # 단지 이름 옆에 세대수
-        hh_html = f' <span style="color:#5f6368;white-space:nowrap">{hh:,}세대</span>' if hh else ""
+        # 단지 이름 옆에 세대수, 괄호 안은 감시 평형(25~26평)의 세대수
+        hh = _info_count((r.get("info") or {}).get("households"))
+        size_hh = size_households(r.get("info"), pyeongs)
+        hh_txt = " ".join(x for x in (f"{hh:,}세대" if hh else "", f"({size_hh:,})" if size_hh else "") if x)
+        hh_html = (f' <span style="color:#5f6368;white-space:nowrap"'
+                   + (f' title="괄호: {esc(label)} 세대수"' if size_hh else "")
+                   + f'>{hh_txt}</span>') if hh_txt else ""
         h.append(f'<tr style="border-top:1px solid #e0e0e0"><td>{link(complex_url(r["no"]), r["name"])}{hh_html}</td>'
                  + "".join(f'<td align="center"{f" colspan={n}" if n > 1 else ""} style="white-space:nowrap'
                            + (';border-left:1px solid #e0e0e0' if i == len(cells) - 3 else "")
@@ -2384,7 +2447,7 @@ def main() -> int:
                           for e in pending if e["kind"] == kind]
             briefing.append(r)
         subject, text, html_body = format_briefing(briefing, size_label(pyeongs), now,
-                                                   last_mail or since)
+                                                   last_mail or since, pyeongs)
         try:
             csv_name = f"매매매물_{now:%Y%m%d}.csv"
             to = send_mail(subject, text, html_body, [(csv_name, listings_csv(briefing), "text/csv")])

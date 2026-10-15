@@ -36,6 +36,8 @@
 - `README.md` — 설치·설정 사용법
 
 ## TODO
+- 10/16 메일 요약표에 `세대수 (25~26평 세대수)` 괄호가 나오는지 확인. 안 나오면 탭에서
+  `python naver_alert.py --check-complex 119101` 한 번 → "평형별 세대수" 줄과 응답 원본으로 위치 확인
 - 다음 조회 실패 때 `state/browser-fail/` 최신 기록으로 `Failed to fetch` 원인 확인 (메모리 부족 추정)
 - 10/4~10/5 탭 cron 정지 원인 미확인 (쇼핑도 같이 멈춤 → 탭 전체 문제라 별도 세션에서)
 - GitHub 저장소 Settings → Default branch를 `main`으로 바꾸기

@@ -591,6 +591,31 @@ class MainTest(unittest.TestCase):
         self.assertEqual(fake.info_calls, [])  # 네이버가 막은 날은 단지 정보를 요청하지 않는다
         self.assertEqual(len(na.load_state()["events"]), 2)
 
+    def test_briefing_mail_size_households(self):
+        orig = (na.LOCAL_PATH, na.smtplib.SMTP_SSL)
+        na.LOCAL_PATH = self.tmp / "local.json"
+        na.LOCAL_PATH.write_text(json.dumps({"SMTP_USER": "me@example.com", "SMTP_PASSWORD": "pw"}))
+        na.smtplib.SMTP_SSL = FakeSMTP
+        FakeSMTP.sent = []
+
+        class Naver(FakeNaver):
+            def complex_info(self, no):
+                return {"totalHouseholdNumber": 1862, "pyeongTypes": [
+                    {"spaceInfo": {"supplySpace": 83.0, "exclusiveSpace": 59.0}, "householdNumber": 120},
+                    {"spaceInfo": {"supplySpace": 86.2, "exclusiveSpace": 59.8}, "householdNumber": 130},
+                    {"spaceInfo": {"supplySpace": 112.0, "exclusiveSpace": 84.0}, "householdNumber": 900}]}
+        try:
+            self.cfg.write_text(json.dumps({"keywords": [], "complexes": {"1": "서면아이파크1단지"},
+                                            "pyeong": [25, 26]}, ensure_ascii=False))
+            fake = Naver({"1": [art(1)]})
+            self.run_main(fake)  # 매물 조회 뒤 단지 정보를 받아 저장
+            self.run_main(fake)
+        finally:
+            na.LOCAL_PATH, na.smtplib.SMTP_SSL = orig
+        msgs = [m[1] for m in FakeSMTP.sent if m[0] == "msg"]
+        table = msgs[-1].get_body(("html",)).get_content().split("</table>")[0]
+        self.assertIn(">1,862세대 (250)</span>", table)
+
     def run_at(self, fake, hour):
         class FixedDT(datetime):
             @classmethod
@@ -758,6 +783,26 @@ class BriefingTest(unittest.TestCase):
                       table)
         self.assertIn(">1,071세대</span>", table)  # 조회 실패한 단지도 세대수는 보임
         self.assertIn(">양정</a></td>", table)  # 세대수를 모르면 이름만
+
+    def test_summary_shows_size_households(self):
+        reports = [{"no": "7", "name": "A", "status": "ok", "listings": [], "new": [], "changes": [],
+                    "gone": [], "info": {"households": 1384, "pyeong_households": {"25": 100, "26": 150,
+                                                                                    "34": 500}}},
+                   {"no": "8", "name": "B", "status": "ok", "listings": [], "new": [], "changes": [],
+                    "gone": [], "info": {"households": 900, "pyeong_households": {"34": 900}}},
+                   {"no": "9", "name": "C", "status": "ok", "listings": [], "new": [], "changes": [],
+                    "gone": [], "info": {"pyeong_households": {"26": 80}}}]
+        now = datetime(2026, 10, 16, 10, tzinfo=na.KST)
+        _, _, body = na.format_briefing(reports, "25~26평", now, pyeongs=[25, 26])
+        table = body.split("</table>")[0]
+        self.assertIn('>A</a> <span style="color:#5f6368;white-space:nowrap" title="괄호: 25~26평 세대수">'
+                      '1,384세대 (250)</span></td>', table)
+        self.assertIn(">B</a> <span", table)
+        self.assertIn(">900세대</span></td>", table)  # 감시 평형이 없는 단지는 괄호 없음
+        self.assertIn(">(80)</span></td>", table)  # 전체 세대수를 몰라도 평형 세대수는 보임
+        # 평형 조건을 모르면 (미리 만든 호출 등) 예전처럼 전체 세대수만
+        _, _, body = na.format_briefing(reports, "25~26평", now)
+        self.assertIn('nowrap">1,384세대</span></td>', body.split("</table>")[0])
 
     def test_events_window(self):
         state = {}
@@ -1171,6 +1216,40 @@ class ComplexInfoTest(unittest.TestCase):
                          "2021년 8월 준공(6년차) · 1,862세대 · 25개동 · 부산시 부산진구 전포동 908 (동성로 50)")
         self.assertEqual(na.parse_complex_info({"useApprovalDate": "2014"}), {"built": "2014"})
         self.assertEqual(na.parse_complex_info({"name": "X", "householdCount": 0}), {})
+
+    def test_pyeong_households(self):
+        # fin.land 매물 목록처럼 면적이 spaceInfo 안에 있는 형식 (59A·59B 둘 다 26평 → 더함)
+        fin = {"totalHouseholdNumber": 1862, "dongCount": 25,
+               "pyeongTypes": [
+                   {"nameType": "A", "spaceInfo": {"supplySpace": 86.23, "exclusiveSpace": 59.78},
+                    "householdNumber": 200, "leaseHouseholdNumber": 10},
+                   {"nameType": "B", "spaceInfo": {"supplySpace": "85.9", "exclusiveSpace": "59.5"},
+                    "householdNumber": "50"},
+                   {"nameType": "A", "spaceInfo": {"supplySpace": 75.24, "exclusiveSpace": 52.6},
+                    "householdNumber": 120},
+                   {"nameType": "A", "spaceInfo": {"supplySpace": 112.4, "exclusiveSpace": 84.9},
+                    "householdNumber": 900}]}
+        info = na.parse_complex_info(fin)
+        self.assertEqual(info["households"], 1862)  # 단지 전체 세대수는 그대로
+        self.assertEqual(info["pyeong_households"], {"26": 250, "23": 120, "34": 900})
+        self.assertEqual(na.size_households(info, [25, 26]), 250)
+        self.assertIsNone(na.size_households(info, []))  # 평형 조건 없음 → 괄호 없음
+        self.assertIsNone(na.size_households(info, [30]))
+        self.assertIsNone(na.size_households({"households": 1862}, [25, 26]))
+        # new.land 형식 (면적이 문자열, 세대수 키 이름이 다름)
+        new = {"complexDetail": {"totalHouseholdCount": 1384},
+               "complexPyeongDetailList": [
+                   {"pyeongNo": "1", "supplyArea": "82.64", "exclusiveArea": "59.96",
+                    "supplyPyeong": "25", "householdCountByPyeong": "180"},
+                   {"pyeongNo": "2", "supplyArea": "109.1", "exclusiveArea": "84.95",
+                    "householdCountByPyeong": "400"}]}
+        self.assertEqual(na.parse_pyeong_households(new), {"25": 180, "33": 400})
+        # 면적이 없는 목록(동별 세대수 등)은 평형별로 보지 않는다
+        self.assertEqual(na.parse_pyeong_households({"dongs": [{"dongName": "101", "householdCount": 80}]}), {})
+        self.assertEqual(na.parse_pyeong_households({"x": [1, 2]}), {})
+        # config.json 에 직접 적은 값도 쓰인다
+        config = {"complex_info": {"1": {"pyeong_households": {"25": 77}}}}
+        self.assertEqual(na.size_households(na.complex_details({}, config, "1"), [25, 26]), 77)
 
     def test_text(self):
         now = datetime(2026, 10, 3, tzinfo=na.KST)
