@@ -7,7 +7,9 @@
 메일과 폰 알림을 보내는 봇(`naver_alert.py`). 안드로이드 탭의 **Termux**에서 돈다.
 
 ## 현재 상태
-- 탭 Termux cron 매일 10:00 → `termux/run-alert.sh` → `naver_alert.py` (실행마다 `git pull`)
+- **2026-11-16부터 꺼짐**: 부동산 알림(메일 포함)이 더는 필요 없어 탭 cron 의 부동산 줄을 주석 처리했다.
+  다시 켜려면 cron 줄 앞 `#` 만 지운다 (`0 10 * * * …/real-estate/termux/run-alert.sh`).
+- (꺼지기 전) 탭 Termux cron 매일 10:00 → `termux/run-alert.sh` → `naver_alert.py` (실행마다 `git pull`)
 - 10/4 낮~10/5 15:45 탭 cron 전체가 멈췄다가 다시 돎. 다른 실행 위치는 막혀서 탭 유지로 결정.
 - 10/6 10:01 첫 조회 전부 `Failed to fetch` → 10분 뒤 자동 재조회 성공, 메일 정상 발송.
 - 10/15 요약표 세대수 옆에 25~26평 세대수 괄호 `1,862세대 (250)` 추가. 네이버 응답에 평형별 세대수가
